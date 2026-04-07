@@ -1,0 +1,16 @@
+# .streamlit/config.toml
+[theme]
+base = "light"                    # "light" ou "dark"
+primaryColor = "#0d6efd"          # cor principal (botões, highlights)
+backgroundColor = "#f7f9fc"       # fundo da página
+secondaryBackgroundColor = "#ffffff"
+textColor = "#0b2545"
+font = "sans serif"               # "sans serif", "serif", "monospace"
+
+[server]
+headless = true
+enableCORS = false
+port = 8501
+
+[browser]
+gatherUsageStats = false
