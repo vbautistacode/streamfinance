@@ -1,0 +1,10 @@
+# .gitignore
+__pycache__/
+*.pyc
+.env
+personal_finance.db
+*.sqlite
+.vscode/
+.venv/
+.venv*/
+*.log
