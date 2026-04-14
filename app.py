@@ -425,7 +425,7 @@ Objetivo do Documento: Definir as diretrizes para a gestão dos ativos, estabele
 
 2. Governança e Responsabilidades
 
-Comitê/Gestor: Quem toma as decisões (ex: CFO, Comitê de Investimentos ou o próprio investidor).
+Comitê/Gestor: .
 
 Custodiantes e Consultores: Identificação das instituições financeiras e consultores externos.
 
