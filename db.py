@@ -1,10 +1,16 @@
 # db.py
+import os
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-# Ajuste a URL se migrar para Postgres/Supabase
-DATABASE_URL = "sqlite:///personal_finance.db"
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+# Read DATABASE_URL from environment for easy deployment (fallback to local sqlite)
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///personal_finance.db")
+
+# Create engine with sqlite-specific connect_args when appropriate
+if DATABASE_URL.startswith("sqlite"):
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+else:
+    engine = create_engine(DATABASE_URL)
 
 DDL_SCRIPT = """
 CREATE TABLE IF NOT EXISTS accounts (
@@ -66,7 +72,6 @@ CREATE TABLE IF NOT EXISTS upload_results (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- Tabela para bens/ativos inseridos manualmente (imóveis, bens móveis, empresas, novos negócios)
 CREATE TABLE IF NOT EXISTS assets (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   categoria TEXT,
@@ -78,7 +83,6 @@ CREATE TABLE IF NOT EXISTS assets (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- Tabela para passivos inseridos manualmente (financiamentos, empréstimos)
 CREATE TABLE IF NOT EXISTS liabilities (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   categoria TEXT,
@@ -90,7 +94,6 @@ CREATE TABLE IF NOT EXISTS liabilities (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- Preço histórico para ativos (opcional)
 CREATE TABLE IF NOT EXISTS prices (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   asset_symbol TEXT,
@@ -99,7 +102,6 @@ CREATE TABLE IF NOT EXISTS prices (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- Snapshots diários do patrimônio líquido
 CREATE TABLE IF NOT EXISTS net_worth_snapshots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   snapshot_date DATE,
@@ -111,7 +113,6 @@ CREATE TABLE IF NOT EXISTS net_worth_snapshots (
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- Tabela de mappings (opcional) para gerenciar via DB
 CREATE TABLE IF NOT EXISTS mappings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   source_name TEXT,
@@ -122,13 +123,21 @@ CREATE TABLE IF NOT EXISTS mappings (
   notes TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Investment Policy Statement (IPS) table
+CREATE TABLE IF NOT EXISTS ips (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT,
+  content TEXT,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 def init_db(engine: Engine = engine):
     """
-    Inicializa o schema de forma compatível com SQLite e outros dialects.
-    - Para SQLite usa executescript via raw_connection.
-    - Para outros DBs executa cada statement separadamente.
+    Initialize database schema.
+    - For SQLite use executescript via raw_connection to run multiple statements.
+    - For other dialects execute statements one by one.
     """
     dialect_name = engine.dialect.name.lower()
     if dialect_name == "sqlite":
@@ -141,10 +150,11 @@ def init_db(engine: Engine = engine):
             cursor.close()
             raw_conn.close()
     else:
+        # split by semicolon and execute each non-empty statement
         statements = [s.strip() for s in DDL_SCRIPT.split(";") if s.strip()]
         with engine.begin() as conn:
             for stmt in statements:
                 conn.execute(text(stmt))
 
-# inicializa ao importar
+# Initialize on import
 init_db()
