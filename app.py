@@ -4,14 +4,22 @@ import pandas as pd
 import numpy as np
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from db import engine
 from etl.normalizers import load_mapping, apply_mapping, validate_required
 from etl.writer import write_staging, promote_merge_sqlite, record_upload_result, record_upload_error
 import plotly.express as px
 import plotly.graph_objects as go
 from sqlalchemy import text
-from babel.numbers import format_currency, format_decimal
+
+# Modules created for separation of concerns
+from ips import load_latest_ips, save_ips, list_ips, delete_ips
+from investment import (
+    list_holdings, list_assets, list_liabilities,
+    add_asset, update_asset, delete_asset,
+    add_liability, update_liability, delete_liability,
+    aggregate_assets_by_category, aggregate_liabilities_by_category
+)
 
 # ---------------- Utility functions ----------------
 def format_brl(value):
@@ -22,43 +30,6 @@ def format_brl(value):
     s = f"{v:,.2f}"
     s = s.replace(",", "X").replace(".", ",").replace("X", ".")
     return f"R$ {s}"
-
-def read_table(table_name):
-    try:
-        with engine.connect() as conn:
-            return pd.read_sql(f"SELECT * FROM {table_name}", conn)
-    except Exception:
-        return pd.DataFrame()
-
-def ensure_ips_table():
-    try:
-        with engine.begin() as conn:
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS ips (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    title TEXT,
-                    content TEXT,
-                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """))
-    except Exception:
-        pass
-
-def load_ips():
-    ensure_ips_table()
-    try:
-        with engine.connect() as conn:
-            df = pd.read_sql("SELECT * FROM ips ORDER BY id DESC LIMIT 1", conn)
-            if df.empty:
-                return None
-            return df.iloc[0].to_dict()
-    except Exception:
-        return None
-
-def save_ips(title, content):
-    ensure_ips_table()
-    with engine.begin() as conn:
-        conn.execute(text("INSERT INTO ips (title, content) VALUES (:t, :c)"), {"t": title, "c": content})
 
 # ---------------- Page config ----------------
 st.set_page_config(page_title="StreamDash — Finanças Pessoais", layout="wide")
@@ -111,11 +82,7 @@ with st.sidebar.form("form_add_asset", clear_on_submit=True):
     submitted_asset = st.form_submit_button("Adicionar ativo")
     if submitted_asset:
         import_batch_id = f"manual_asset_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-        with engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO assets (categoria, descricao, valor, source, import_batch_id)
-                VALUES (:categoria, :descricao, :valor, :source, :ib)
-            """), {"categoria": a_categoria, "descricao": a_descricao, "valor": a_valor, "source": "manual_form", "ib": import_batch_id})
+        add_asset(a_categoria, a_descricao, a_valor, source="manual_form", import_batch_id=import_batch_id)
         st.sidebar.success("Ativo adicionado com sucesso.")
         st.experimental_rerun()
 
@@ -128,11 +95,7 @@ with st.sidebar.form("form_add_liability", clear_on_submit=True):
     submitted_liab = st.form_submit_button("Adicionar passivo")
     if submitted_liab:
         import_batch_id = f"manual_liab_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-        with engine.begin() as conn:
-            conn.execute(text("""
-                INSERT INTO liabilities (categoria, descricao, valor, source, import_batch_id)
-                VALUES (:categoria, :descricao, :valor, :source, :ib)
-            """), {"categoria": l_categoria, "descricao": l_descricao, "valor": l_valor, "source": "manual_form", "ib": import_batch_id})
+        add_liability(l_categoria, l_descricao, l_valor, source="manual_form", import_batch_id=import_batch_id)
         st.sidebar.success("Passivo adicionado com sucesso.")
         st.experimental_rerun()
 
@@ -140,12 +103,12 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Editar / Remover ativos e passivos")
 
 # load manual assets/liabilities for sidebar controls
-df_assets_manual = read_table("assets")
-df_liabilities_manual = read_table("liabilities")
+df_assets_manual = list_assets()
+df_liabilities_manual = list_liabilities()
 
 # Edit / remove assets
 if not df_assets_manual.empty:
-    asset_options = df_assets_manual.apply(lambda r: f"{int(r.id)} | {r.categoria} | {r.descricao} | R$ {float(r.valor):,.2f}", axis=1).tolist()
+    asset_options = df_assets_manual.apply(lambda r: f"{int(r.id)} | {r.categoria} | {r.descricao} | {format_brl(r.valor)}", axis=1).tolist()
     selected_asset = st.sidebar.selectbox("Selecionar ativo para editar/remover", [""] + asset_options, key="sel_asset")
     if selected_asset:
         sel_id = int(selected_asset.split("|")[0].strip())
@@ -159,15 +122,11 @@ if not df_assets_manual.empty:
             btn_update_asset = st.form_submit_button("Atualizar ativo")
             btn_delete_asset = st.form_submit_button("Remover ativo")
             if btn_update_asset:
-                with engine.begin() as conn:
-                    conn.execute(text("""
-                        UPDATE assets SET categoria=:categoria, descricao=:descricao, valor=:valor WHERE id=:id
-                    """), {"categoria": e_categoria, "descricao": e_descricao, "valor": e_valor, "id": sel_id})
+                update_asset(sel_id, e_categoria, e_descricao, e_valor)
                 st.sidebar.success("Ativo atualizado.")
                 st.experimental_rerun()
             if btn_delete_asset:
-                with engine.begin() as conn:
-                    conn.execute(text("DELETE FROM assets WHERE id = :id"), {"id": sel_id})
+                delete_asset(sel_id)
                 st.sidebar.success("Ativo removido.")
                 st.experimental_rerun()
 else:
@@ -175,7 +134,7 @@ else:
 
 # Edit / remove liabilities
 if not df_liabilities_manual.empty:
-    liab_options = df_liabilities_manual.apply(lambda r: f"{int(r.id)} | {r.categoria} | {r.descricao} | R$ {float(r.valor):,.2f}", axis=1).tolist()
+    liab_options = df_liabilities_manual.apply(lambda r: f"{int(r.id)} | {r.categoria} | {r.descricao} | {format_brl(r.valor)}", axis=1).tolist()
     selected_liab = st.sidebar.selectbox("Selecionar passivo para editar/remover", [""] + liab_options, key="sel_liab")
     if selected_liab:
         sel_id = int(selected_liab.split("|")[0].strip())
@@ -189,15 +148,11 @@ if not df_liabilities_manual.empty:
             btn_update_liab = st.form_submit_button("Atualizar passivo")
             btn_delete_liab = st.form_submit_button("Remover passivo")
             if btn_update_liab:
-                with engine.begin() as conn:
-                    conn.execute(text("""
-                        UPDATE liabilities SET categoria=:categoria, descricao=:descricao, valor=:valor WHERE id=:id
-                    """), {"categoria": e_categoria, "descricao": e_descricao, "valor": e_valor, "id": sel_id})
+                update_liability(sel_id, e_categoria, e_descricao, e_valor)
                 st.sidebar.success("Passivo atualizado.")
                 st.experimental_rerun()
             if btn_delete_liab:
-                with engine.begin() as conn:
-                    conn.execute(text("DELETE FROM liabilities WHERE id = :id"), {"id": sel_id})
+                delete_liability(sel_id)
                 st.sidebar.success("Passivo removido.")
                 st.experimental_rerun()
 else:
@@ -211,10 +166,16 @@ def render_visao_geral():
     st.subheader("Visão Geral")
 
     # Tentar ler transactions e snapshots do DB
-    df_transactions = read_table("transactions")
-    df_snapshots = read_table("net_worth_snapshots")
+    try:
+        df_transactions = pd.read_sql("SELECT * FROM transactions", engine.connect())
+    except Exception:
+        df_transactions = pd.DataFrame()
+    try:
+        df_snapshots = pd.read_sql("SELECT * FROM net_worth_snapshots", engine.connect())
+    except Exception:
+        df_snapshots = pd.DataFrame()
 
-    # Se houver snapshots, usar para evolução do patrimônio; senão, tentar construir a partir de holdings + assets
+    # Se houver snapshots, usar para evolução do patrimônio; senão, fallback mocks
     if not df_snapshots.empty:
         df_evol_real = df_snapshots.sort_values("snapshot_date").rename(columns={"snapshot_date":"date","net_worth":"Patrimônio"})
         df_evol_plot = df_evol_real[["date","Patrimônio"]].copy()
@@ -246,8 +207,7 @@ def render_visao_geral():
     # Plot 1: evolução do patrimônio
     st.caption("1) Evolução do Patrimônio vs CDI / Renda Fixa / IBOV")
     fig1 = px.line(df_plot, x="date", y="valor", color="serie",
-                   labels={"date":"Data","valor":"Valor (R$)","serie":"Série"},
-                   hover_data={"date":True,"serie":True,"valor":":.2f"})
+                   labels={"date":"Data","valor":"Valor (R$)","serie":"Série"})
     fig1.update_layout(height=420, legend_title_text="Séries", margin=dict(t=40, b=40, l=40, r=40))
     st.plotly_chart(fig1, use_container_width=True)
     st.markdown("---")
@@ -257,15 +217,17 @@ def render_visao_geral():
     if not df_transactions.empty:
         df_tx = df_transactions.copy()
         df_tx["date"] = pd.to_datetime(df_tx["date"], errors="coerce").dt.date
-        df_daily = df_tx.groupby("date").agg(entradas=("amount", lambda s: s[s>0].sum() if not s[s>0].empty else 0.0),
-                                             saidas=("amount", lambda s: -s[s<0].sum() if not s[s<0].empty else 0.0)).reset_index()
+        df_daily = df_tx.groupby("date").agg(
+            entradas=("amount", lambda s: s[s>0].sum() if not s[s>0].empty else 0.0),
+            saidas=("amount", lambda s: -s[s<0].sum() if not s[s<0].empty else 0.0)
+        ).reset_index()
         df_daily = df_daily.sort_values("date").tail(180)
         fig2 = go.Figure()
         fig2.add_trace(go.Bar(x=df_daily["date"], y=df_daily["entradas"], name="Entradas", marker_color="#2ca02c",
                               text=df_daily["entradas"].apply(format_brl), textposition="auto"))
         fig2.add_trace(go.Bar(x=df_daily["date"], y=df_daily["saidas"], name="Saídas", marker_color="#d62728",
                               text=df_daily["saidas"].apply(format_brl), textposition="auto"))
-        fig2.update_layout(barmode='group', xaxis_title="Data", yaxis_title="Valor (R$)", height=420, margin=dict(t=40, b=40, l=40, r=40))
+        fig2.update_layout(barmode='group', xaxis_title="Data", yaxis_title="Valor (R$)", height=420)
         st.plotly_chart(fig2, use_container_width=True)
     else:
         fig2 = go.Figure()
@@ -276,7 +238,7 @@ def render_visao_geral():
                               text=[format_brl(v) for v in entradas], textposition="auto"))
         fig2.add_trace(go.Bar(x=dates, y=saidas, name="Saídas", marker_color="#d62728",
                               text=[format_brl(v) for v in saidas], textposition="auto"))
-        fig2.update_layout(barmode='group', xaxis_title="Data", yaxis_title="Valor (R$)", height=420, margin=dict(t=40, b=40, l=40, r=40))
+        fig2.update_layout(barmode='group', xaxis_title="Data", yaxis_title="Valor (R$)", height=420)
         st.plotly_chart(fig2, use_container_width=True)
     st.markdown("---")
 
@@ -292,11 +254,11 @@ def render_visao_geral():
             st.info("Nenhuma despesa categorizada encontrada.")
         else:
             df_cat["expense_fmt"] = df_cat["expense"].apply(format_brl)
-            fig3 = px.pie(df_cat, names="category", values="expense", hole=0.35, labels={"category":"Categoria","expense":"Valor (R$)"})
+            fig3 = px.pie(df_cat, names="category", values="expense", hole=0.35)
             fig3.update_traces(textposition='inside', textinfo='percent+label',
                                customdata=df_cat[["expense_fmt"]].values,
                                hovertemplate="%{label}<br>%{customdata[0]}<extra></extra>")
-            fig3.update_layout(height=420, margin=dict(t=40, b=40, l=40, r=40))
+            fig3.update_layout(height=420)
             st.plotly_chart(fig3, use_container_width=True)
     else:
         df_mock = pd.DataFrame({"categoria": ["Alimentação","Moradia","Transporte","Lazer","Saúde","Outros"], "valor": np.random.dirichlet(np.ones(6))*5000})
@@ -305,7 +267,7 @@ def render_visao_geral():
         fig3.update_traces(textposition='inside', textinfo='percent+label',
                            customdata=df_mock[["valor_fmt"]].values,
                            hovertemplate="%{label}<br>%{customdata[0]}<extra></extra>")
-        fig3.update_layout(height=420, margin=dict(t=40, b=40, l=40, r=40))
+        fig3.update_layout(height=420)
         st.plotly_chart(fig3, use_container_width=True)
     st.markdown("---")
 
@@ -328,13 +290,7 @@ def render_visao_geral():
         except Exception:
             fluxo_30 = 0.0
     else:
-        if 'fluxo' in locals():
-            try:
-                fluxo_30 = fluxo.tail(30)['saldo'].sum()
-            except Exception:
-                fluxo_30 = 0.0
-        else:
-            fluxo_30 = 0.0
+        fluxo_30 = 0.0
 
     # Despesas últimos 30 dias
     if 'df_cat' in locals():
@@ -363,9 +319,12 @@ def render_visao_geral():
     # ------------------ Composição Patrimonial ----------------
     st.markdown("### Composição Patrimonial | Bens e Investimentos")
 
-    # Reusar df_assets_manual and df_liabilities_manual loaded earlier
-    df_holdings = read_table("holdings")
-    if df_holdings.empty and df_assets_manual.empty and df_liabilities_manual.empty:
+    df_holdings = list_holdings()
+    df_assets = list_assets()
+    df_liab = list_liabilities()
+
+    # Build assets from holdings + manual assets
+    if df_holdings.empty and df_assets.empty and df_liab.empty:
         assets = [
             {"categoria": "Imóveis", "descricao": "Apartamento SP", "valor": 650000},
             {"categoria": "Imóveis", "descricao": "Casa de praia", "valor": 420000},
@@ -379,8 +338,8 @@ def render_visao_geral():
             {"categoria": "Financiamento Imobiliário", "descricao": "Saldo financiamento apto", "valor": 300000},
             {"categoria": "Empréstimo Pessoal", "descricao": "Empréstimo banco X", "valor": 25000},
         ]
-        df_assets = pd.DataFrame(assets)
-        df_liab = pd.DataFrame(liabilities)
+        df_assets_display = pd.DataFrame(assets)
+        df_liab_display = pd.DataFrame(liabilities)
     else:
         parts = []
         if not df_holdings.empty:
@@ -394,13 +353,13 @@ def render_visao_geral():
             df_h["categoria"] = df_h.get("category", "Investimentos")
             df_h["descricao"] = df_h.get("asset_symbol", "")
             parts.append(df_h[["categoria","descricao","valor"]])
-        if not df_assets_manual.empty:
-            parts.append(df_assets_manual[["categoria","descricao","valor"]])
-        df_assets = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["categoria","descricao","valor"])
-        df_liab = df_liabilities_manual[["categoria","descricao","valor"]] if not df_liabilities_manual.empty else pd.DataFrame(columns=["categoria","descricao","valor"])
+        if not df_assets.empty:
+            parts.append(df_assets[["categoria","descricao","valor"]])
+        df_assets_display = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["categoria","descricao","valor"])
+        df_liab_display = df_liab[["categoria","descricao","valor"]] if not df_liab.empty else pd.DataFrame(columns=["categoria","descricao","valor"])
 
-    agg_assets = df_assets.groupby("categoria", as_index=False)["valor"].sum() if not df_assets.empty else pd.DataFrame(columns=["categoria","valor"])
-    agg_liab = df_liab.groupby("categoria", as_index=False)["valor"].sum() if not df_liab.empty else pd.DataFrame(columns=["categoria","valor"])
+    agg_assets = df_assets_display.groupby("categoria", as_index=False)["valor"].sum() if not df_assets_display.empty else pd.DataFrame(columns=["categoria","valor"])
+    agg_liab = df_liab_display.groupby("categoria", as_index=False)["valor"].sum() if not df_liab_display.empty else pd.DataFrame(columns=["categoria","valor"])
 
     total_assets = float(agg_assets["valor"].sum()) if not agg_assets.empty else 0.0
     total_liab = float(agg_liab["valor"].sum()) if not agg_liab.empty else 0.0
@@ -417,16 +376,15 @@ def render_visao_geral():
 
     st.markdown("#### Distribuição de ativos por categoria")
     if not agg_assets.empty:
-        fig_assets_pie = px.pie(agg_assets, names="categoria", values="valor", hole=0.35,
-                                title="Ativos por categoria", labels={"valor":"Valor (R$)","categoria":"Categoria"})
+        fig_assets_pie = px.pie(agg_assets, names="categoria", values="valor", hole=0.35)
         fig_assets_pie.update_traces(textinfo="percent+label")
         st.plotly_chart(fig_assets_pie, use_container_width=True)
     else:
         st.info("Nenhum ativo registrado ainda.")
 
     st.markdown("#### Detalhe de ativos")
-    if not df_assets.empty:
-        df_display = df_assets.copy()
+    if not df_assets_display.empty:
+        df_display = df_assets_display.copy()
         df_display["valor"] = df_display["valor"].apply(format_brl)
         st.dataframe(df_display, use_container_width=True)
     else:
@@ -434,8 +392,7 @@ def render_visao_geral():
 
     st.markdown("#### Distribuição de passivos por categoria")
     if not agg_liab.empty:
-        fig_liab = px.bar(agg_liab, x="categoria", y="valor", labels={"valor":"Valor (R$)","categoria":"Categoria"},
-                          title="Passivos por categoria", text="valor")
+        fig_liab = px.bar(agg_liab, x="categoria", y="valor", labels={"valor":"Valor (R$)","categoria":"Categoria"}, text="valor")
         fig_liab.update_traces(texttemplate="R$ %{y:,.0f}")
         fig_liab.update_layout(yaxis_tickformat=",.0f")
         st.plotly_chart(fig_liab, use_container_width=True)
@@ -443,8 +400,8 @@ def render_visao_geral():
         st.info("Nenhum passivo registrado ainda.")
 
     st.markdown("#### Detalhe de passivos")
-    if not df_liab.empty:
-        df_display_l = df_liab.copy()
+    if not df_liab_display.empty:
+        df_display_l = df_liab_display.copy()
         df_display_l["valor"] = df_display_l["valor"].apply(format_brl)
         st.dataframe(df_display_l, use_container_width=True)
     else:
@@ -458,7 +415,7 @@ def render_ips():
     st.header("Modelo de Investment Policy Statement (IPS)")
     st.markdown("Use este espaço para registrar a política de investimentos do investidor. Você pode editar e salvar a versão atual no banco de dados.")
 
-    ips_row = load_ips()
+    ips_row = load_latest_ips()
     default_title = ips_row["title"] if ips_row else "Investment Policy Statement - Cliente"
     default_content = ips_row["content"] if ips_row else """1. Introdução e Propósito
 
@@ -542,9 +499,9 @@ Critérios de Sucesso: Comparação da rentabilidade da carteira consolidada con
 def render_controle():
     st.header("Controle de Investimentos")
 
-    df_holdings = read_table("holdings")
-    df_assets = read_table("assets")
-    df_liab = read_table("liabilities")
+    df_holdings = list_holdings()
+    df_assets = list_assets()
+    df_liab = list_liabilities()
 
     st.subheader("Holdings (ativos financeiros)")
     if not df_holdings.empty:
@@ -607,14 +564,11 @@ def render_controle():
                 b_up = st.form_submit_button("Atualizar ativo")
                 b_del = st.form_submit_button("Remover ativo")
                 if b_up:
-                    with engine.begin() as conn:
-                        conn.execute(text("UPDATE assets SET categoria=:cat, descricao=:desc, valor=:val WHERE id=:id"),
-                                     {"cat": ca, "desc": cd, "val": cv, "id": aid})
+                    update_asset(aid, ca, cd, cv)
                     st.success("Ativo atualizado.")
                     st.experimental_rerun()
                 if b_del:
-                    with engine.begin() as conn:
-                        conn.execute(text("DELETE FROM assets WHERE id=:id"), {"id": aid})
+                    delete_asset(aid)
                     st.success("Ativo removido.")
                     st.experimental_rerun()
     else:
@@ -645,14 +599,11 @@ def render_controle():
                 b_up_l = st.form_submit_button("Atualizar passivo")
                 b_del_l = st.form_submit_button("Remover passivo")
                 if b_up_l:
-                    with engine.begin() as conn:
-                        conn.execute(text("UPDATE liabilities SET categoria=:cat, descricao=:desc, valor=:val WHERE id=:id"),
-                                     {"cat": la, "desc": ld, "val": lv, "id": lid})
+                    update_liability(lid, la, ld, lv)
                     st.success("Passivo atualizado.")
                     st.experimental_rerun()
                 if b_del_l:
-                    with engine.begin() as conn:
-                        conn.execute(text("DELETE FROM liabilities WHERE id=:id"), {"id": lid})
+                    delete_liability(lid)
                     st.success("Passivo removido.")
                     st.experimental_rerun()
     else:
