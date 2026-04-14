@@ -12,9 +12,15 @@ import plotly.express as px
 import plotly.graph_objects as go
 from sqlalchemy import text
 
-# Import rendering functions from modules
-from ips import render_ips
-from investment import render_controle, list_assets, list_liabilities, add_asset, add_liability
+# Import UI renderers and data functions from modules
+from ips import render_ips, load_latest_ips, save_ips
+from investment import (
+    render_controle,
+    list_holdings, list_assets, list_liabilities,
+    add_asset, update_asset, delete_asset,
+    add_liability, update_liability, delete_liability,
+    aggregate_assets_by_category, aggregate_liabilities_by_category
+)
 
 # ---------------- Utility functions ----------------
 def format_brl(value):
@@ -68,13 +74,12 @@ if uploaded:
             record_upload_result(import_batch_id, file_name, rows_staged, rows_promoted, "processed")
             st.sidebar.success(f"Arquivo processado. Linhas promovidas: {rows_promoted}")
 
-# ---------------- Sidebar: quick manual add forms ----------------
 st.sidebar.markdown("---")
-st.sidebar.subheader("Adicionar bem / ativo (rápido)")
-with st.sidebar.form("form_add_asset_quick", clear_on_submit=True):
-    a_categoria = st.selectbox("Categoria", ["Imóveis","Bens Móveis","Empresas","Novos Negócios","Investimentos","Outros"], key="asset_cat_quick")
-    a_descricao = st.text_input("Descrição", key="asset_desc_quick")
-    a_valor = st.number_input("Valor (R$)", min_value=0.0, step=100.0, format="%.2f", key="asset_val_quick")
+st.sidebar.subheader("Adicionar bem / ativo")
+with st.sidebar.form("form_add_asset", clear_on_submit=True):
+    a_categoria = st.selectbox("Categoria", ["Imóveis","Bens Móveis","Empresas","Novos Negócios","Investimentos","Outros"], key="asset_cat")
+    a_descricao = st.text_input("Descrição", key="asset_desc")
+    a_valor = st.number_input("Valor (R$)", min_value=0.0, step=100.0, format="%.2f", key="asset_val")
     submitted_asset = st.form_submit_button("Adicionar ativo")
     if submitted_asset:
         import_batch_id = f"manual_asset_{int(time.time())}_{uuid.uuid4().hex[:6]}"
@@ -83,11 +88,11 @@ with st.sidebar.form("form_add_asset_quick", clear_on_submit=True):
         st.experimental_rerun()
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Adicionar passivo / dívida (rápido)")
-with st.sidebar.form("form_add_liability_quick", clear_on_submit=True):
-    l_categoria = st.selectbox("Categoria (passivo)", ["Financiamento Imobiliário","Empréstimo Pessoal","Cartão de Crédito","Outros"], key="liab_cat_quick")
-    l_descricao = st.text_input("Descrição do passivo", key="liab_desc_quick")
-    l_valor = st.number_input("Valor (R$)", min_value=0.0, step=100.0, format="%.2f", key="liab_val_quick")
+st.sidebar.subheader("Adicionar passivo / dívida")
+with st.sidebar.form("form_add_liability", clear_on_submit=True):
+    l_categoria = st.selectbox("Categoria (passivo)", ["Financiamento Imobiliário","Empréstimo Pessoal","Cartão de Crédito","Outros"], key="liab_cat")
+    l_descricao = st.text_input("Descrição do passivo", key="liab_desc")
+    l_valor = st.number_input("Valor (R$)", min_value=0.0, step=100.0, format="%.2f", key="liab_val")
     submitted_liab = st.form_submit_button("Adicionar passivo")
     if submitted_liab:
         import_batch_id = f"manual_liab_{int(time.time())}_{uuid.uuid4().hex[:6]}"
@@ -95,15 +100,73 @@ with st.sidebar.form("form_add_liability_quick", clear_on_submit=True):
         st.sidebar.success("Passivo adicionado com sucesso.")
         st.experimental_rerun()
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("Editar / Remover ativos e passivos")
+
+# load manual assets/liabilities for sidebar controls
+df_assets_manual = list_assets()
+df_liabilities_manual = list_liabilities()
+
+# Edit / remove assets
+if not df_assets_manual.empty:
+    asset_options = df_assets_manual.apply(lambda r: f"{int(r.id)} | {r.categoria} | {r.descricao} | {format_brl(r.valor)}", axis=1).tolist()
+    selected_asset = st.sidebar.selectbox("Selecionar ativo para editar/remover", [""] + asset_options, key="sel_asset")
+    if selected_asset:
+        sel_id = int(selected_asset.split("|")[0].strip())
+        sel_row = df_assets_manual[df_assets_manual["id"] == sel_id].iloc[0]
+        with st.sidebar.form("form_edit_asset", clear_on_submit=False):
+            categories = ["Imóveis","Bens Móveis","Empresas","Novos Negócios","Investimentos","Outros"]
+            idx = categories.index(sel_row.categoria) if sel_row.categoria in categories else 0
+            e_categoria = st.selectbox("Categoria", categories, index=idx)
+            e_descricao = st.text_input("Descrição", value=sel_row.descricao)
+            e_valor = st.number_input("Valor (R$)", min_value=0.0, step=100.0, value=float(sel_row.valor))
+            btn_update_asset = st.form_submit_button("Atualizar ativo")
+            btn_delete_asset = st.form_submit_button("Remover ativo")
+            if btn_update_asset:
+                update_asset(sel_id, e_categoria, e_descricao, e_valor)
+                st.sidebar.success("Ativo atualizado.")
+                st.experimental_rerun()
+            if btn_delete_asset:
+                delete_asset(sel_id)
+                st.sidebar.success("Ativo removido.")
+                st.experimental_rerun()
+else:
+    st.sidebar.info("Nenhum ativo manual registrado.")
+
+# Edit / remove liabilities
+if not df_liabilities_manual.empty:
+    liab_options = df_liabilities_manual.apply(lambda r: f"{int(r.id)} | {r.categoria} | {r.descricao} | {format_brl(r.valor)}", axis=1).tolist()
+    selected_liab = st.sidebar.selectbox("Selecionar passivo para editar/remover", [""] + liab_options, key="sel_liab")
+    if selected_liab:
+        sel_id = int(selected_liab.split("|")[0].strip())
+        sel_row = df_liabilities_manual[df_liabilities_manual["id"] == sel_id].iloc[0]
+        with st.sidebar.form("form_edit_liab", clear_on_submit=False):
+            categories_l = ["Financiamento Imobiliário","Empréstimo Pessoal","Cartão de Crédito","Outros"]
+            idx = categories_l.index(sel_row.categoria) if sel_row.categoria in categories_l else 0
+            e_categoria = st.selectbox("Categoria (passivo)", categories_l, index=idx)
+            e_descricao = st.text_input("Descrição do passivo", value=sel_row.descricao)
+            e_valor = st.number_input("Valor (R$)", min_value=0.0, step=100.0, value=float(sel_row.valor), key="edit_liab_val")
+            btn_update_liab = st.form_submit_button("Atualizar passivo")
+            btn_delete_liab = st.form_submit_button("Remover passivo")
+            if btn_update_liab:
+                update_liability(sel_id, e_categoria, e_descricao, e_valor)
+                st.sidebar.success("Passivo atualizado.")
+                st.experimental_rerun()
+            if btn_delete_liab:
+                delete_liability(sel_id)
+                st.sidebar.success("Passivo removido.")
+                st.experimental_rerun()
+else:
+    st.sidebar.info("Nenhum passivo manual registrado.")
+
 # ---------------- Page navigation ----------------
 page = st.sidebar.radio("Navegação", ["Visão Geral", "IPS", "Controle de Investimentos"], index=0)
 
-# ---------------- Visão Geral (keeps main dashboard) ----------------
-if page == "Visão Geral":
-    # Minimal orchestration: reuse the existing logic in app for the dashboard
+# ---------------- Visão Geral page ----------------
+def render_visao_geral():
     st.subheader("Visão Geral")
 
-    # Try to read transactions and snapshots
+    # Tentar ler transactions e snapshots do DB
     try:
         with engine.connect() as conn:
             df_transactions = pd.read_sql("SELECT * FROM transactions", conn)
@@ -115,7 +178,7 @@ if page == "Visão Geral":
     except Exception:
         df_snapshots = pd.DataFrame()
 
-    # Build df_plot (snapshots or mock)
+    # Se houver snapshots, usar para evolução do patrimônio; senão, fallback mocks
     if not df_snapshots.empty:
         df_evol_real = df_snapshots.sort_values("snapshot_date").rename(columns={"snapshot_date":"date","net_worth":"Patrimônio"})
         df_evol_plot = df_evol_real[["date","Patrimônio"]].copy()
@@ -144,7 +207,7 @@ if page == "Visão Geral":
             "INDJ26": indj26
         }).melt(id_vars=["date"], var_name="serie", value_name="valor")
 
-    # Plot 1
+    # Plot 1: evolução do patrimônio
     st.caption("1) Evolução do Patrimônio vs CDI / Renda Fixa / IBOV")
     fig1 = px.line(df_plot, x="date", y="valor", color="serie",
                    labels={"date":"Data","valor":"Valor (R$)","serie":"Série"})
@@ -211,14 +274,154 @@ if page == "Visão Geral":
         st.plotly_chart(fig3, use_container_width=True)
     st.markdown("---")
 
-    # Resumo e composição patrimonial (keeps previous logic)
-    # ... (the rest of the Visão Geral composition code can remain here as before) ...
-    # For brevity, reuse the composition logic from your previous app version.
+    # Pequena tabela resumo (robust)
+    st.markdown("### Resumo")
+    # Saldo total
+    if not df_snapshots.empty:
+        latest = df_snapshots.sort_values("snapshot_date").iloc[-1]
+        saldo_total = float(latest.net_worth)
+    else:
+        try:
+            saldo_total = float(df_plot[df_plot['serie'] == 'Patrimônio']['valor'].iloc[-1])
+        except Exception:
+            saldo_total = 0.0
+
+    # Fluxo líquido últimos 30 dias
+    if 'df_daily' in locals():
+        try:
+            fluxo_30 = (df_daily['entradas'] - df_daily['saidas']).tail(30).sum()
+        except Exception:
+            fluxo_30 = 0.0
+    else:
+        fluxo_30 = 0.0
+
+    # Despesas últimos 30 dias
+    if 'df_cat' in locals():
+        try:
+            despesas_30 = float(df_cat['expense'].sum())
+        except Exception:
+            despesas_30 = 0.0
+    elif 'df_mock' in locals():
+        try:
+            despesas_30 = float(df_mock['valor'].sum())
+        except Exception:
+            despesas_30 = 0.0
+    else:
+        despesas_30 = 0.0
+
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.metric("Saldo Total", format_brl(saldo_total))
+    with col_b:
+        st.metric("Fluxo Líquido (últimos 30d)", format_brl(fluxo_30))
+    with col_c:
+        st.metric("Despesas (últimos 30d)", format_brl(despesas_30))
+
+    st.markdown("---")
+
+    # ------------------ Composição Patrimonial ----------------
+    st.markdown("### Composição Patrimonial | Bens e Investimentos")
+
+    df_holdings = list_holdings()
+    df_assets = list_assets()
+    df_liab = list_liabilities()
+
+    # Build assets from holdings + manual assets
+    if df_holdings.empty and df_assets.empty and df_liab.empty:
+        assets = [
+            {"categoria": "Imóveis", "descricao": "Apartamento SP", "valor": 650000},
+            {"categoria": "Imóveis", "descricao": "Casa de praia", "valor": 420000},
+            {"categoria": "Bens Móveis", "descricao": "Carro - Sedan", "valor": 85000},
+            {"categoria": "Empresas", "descricao": "Participação Startup A", "valor": 200000},
+            {"categoria": "Novos Negócios", "descricao": "Projeto B (pré-receita)", "valor": 50000},
+            {"categoria": "Investimentos", "descricao": "Carteira Ações", "valor": 180000},
+            {"categoria": "Investimentos", "descricao": "Renda Fixa", "valor": 120000},
+        ]
+        liabilities = [
+            {"categoria": "Financiamento Imobiliário", "descricao": "Saldo financiamento apto", "valor": 300000},
+            {"categoria": "Empréstimo Pessoal", "descricao": "Empréstimo banco X", "valor": 25000},
+        ]
+        df_assets_display = pd.DataFrame(assets)
+        df_liab_display = pd.DataFrame(liabilities)
+    else:
+        parts = []
+        if not df_holdings.empty:
+            df_h = df_holdings.copy()
+            if "market_value" in df_h.columns:
+                df_h["valor"] = df_h["market_value"].astype(float)
+            elif "quantity" in df_h.columns and "avg_cost" in df_h.columns:
+                df_h["valor"] = df_h["quantity"].astype(float) * df_h["avg_cost"].astype(float)
+            else:
+                df_h["valor"] = 0.0
+            df_h["categoria"] = df_h.get("category", "Investimentos")
+            df_h["descricao"] = df_h.get("asset_symbol", "")
+            parts.append(df_h[["categoria","descricao","valor"]])
+        if not df_assets.empty:
+            parts.append(df_assets[["categoria","descricao","valor"]])
+        df_assets_display = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["categoria","descricao","valor"])
+        df_liab_display = df_liab[["categoria","descricao","valor"]] if not df_liab.empty else pd.DataFrame(columns=["categoria","descricao","valor"])
+
+    agg_assets = df_assets_display.groupby("categoria", as_index=False)["valor"].sum() if not df_assets_display.empty else pd.DataFrame(columns=["categoria","valor"])
+    agg_liab = df_liab_display.groupby("categoria", as_index=False)["valor"].sum() if not df_liab_display.empty else pd.DataFrame(columns=["categoria","valor"])
+
+    total_assets = float(agg_assets["valor"].sum()) if not agg_assets.empty else 0.0
+    total_liab = float(agg_liab["valor"].sum()) if not agg_liab.empty else 0.0
+    net_worth = total_assets - total_liab
+
+    # KPIs
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Ativos Totais", format_brl(total_assets))
+    with col2:
+        st.metric("Passivos Totais", format_brl(total_liab))
+    with col3:
+        st.metric("Patrimônio Líquido", format_brl(net_worth))
+
+    st.markdown("#### Distribuição de ativos por categoria")
+    if not agg_assets.empty:
+        fig_assets_pie = px.pie(agg_assets, names="categoria", values="valor", hole=0.35)
+        fig_assets_pie.update_traces(textinfo="percent+label")
+        st.plotly_chart(fig_assets_pie, use_container_width=True)
+    else:
+        st.info("Nenhum ativo registrado ainda.")
+
+    st.markdown("#### Detalhe de ativos")
+    if not df_assets_display.empty:
+        df_display = df_assets_display.copy()
+        df_display["valor"] = df_display["valor"].apply(format_brl)
+        st.dataframe(df_display, use_container_width=True)
+    else:
+        st.write("Nenhum ativo detalhado disponível.")
+
+    st.markdown("#### Distribuição de passivos por categoria")
+    if not agg_liab.empty:
+        fig_liab = px.bar(agg_liab, x="categoria", y="valor", labels={"valor":"Valor (R$)","categoria":"Categoria"}, text="valor")
+        fig_liab.update_traces(texttemplate="R$ %{y:,.0f}")
+        fig_liab.update_layout(yaxis_tickformat=",.0f")
+        st.plotly_chart(fig_liab, use_container_width=True)
+    else:
+        st.info("Nenhum passivo registrado ainda.")
+
+    st.markdown("#### Detalhe de passivos")
+    if not df_liab_display.empty:
+        df_display_l = df_liab_display.copy()
+        df_display_l["valor"] = df_display_l["valor"].apply(format_brl)
+        st.dataframe(df_display_l, use_container_width=True)
+    else:
+        st.write("Nenhum passivo detalhado disponível.")
+
+    st.markdown("---")
+    st.info("Formulários e controles de edição estão no sidebar. Para produção, adicione autenticação, validação e backups.")
 
 # ---------------- IPS page ----------------
-elif page == "IPS":
-    render_ips()  # function implemented in ips.py
-
+# IPS rendering moved to ips.render_ips
 # ---------------- Controle de Investimentos page ----------------
+# Controle rendering moved to investment.render_controle
+
+# ---------------- Render selected page ----------------
+if page == "Visão Geral":
+    render_visao_geral()
+elif page == "IPS":
+    render_ips()
 elif page == "Controle de Investimentos":
-    render_controle()  # function implemented in investment.py
+    render_controle()
