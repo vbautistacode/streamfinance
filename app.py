@@ -47,7 +47,7 @@ tab_visao, tab_cash, tab_controle, tab_ips = st.tabs(["Início", "Fluxo de Caixa
 # Sidebar: monthly series quick form and CSV import (kept in sidebar)
 
 st.sidebar.header("Adolfo Pacheco")
-st.sidebar.subheader("Séries mensais (Paula - Adolfo)")
+st.sidebar.subheader("Atualização de Investimentos")
 owner_sel = st.sidebar.selectbox("Investidor", ["Paula Casale", "Adolfo Pacheco"], key="series_owner")
 period_input = st.sidebar.text_input("Período (YYYY-MM)", value=datetime.today().strftime("%Y-%m"), key="series_period")
 pat_input = st.sidebar.number_input("Patrimônio (R$)", value=0.0, format="%.2f", key="series_patrimonio")
