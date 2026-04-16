@@ -7,8 +7,8 @@ from datetime import datetime
 DDL = """
 CREATE TABLE IF NOT EXISTS monthly_series (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  owner TEXT NOT NULL,            -- ex: 'Paula Casale' ou 'Adolfo Pacheco'
-  period DATE NOT NULL,           -- use first day do mês: YYYY-MM-01
+  owner TEXT NOT NULL,
+  period DATE NOT NULL,
   patrimonio NUMERIC,
   cdi NUMERIC,
   ipca NUMERIC,
@@ -22,6 +22,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_owner_period ON monthly_series(owner, perio
 """
 
 def ensure_table():
+    """
+    Ensure the monthly_series table exists. Safe to call repeatedly.
+    """
     dialect = engine.dialect.name.lower()
     if dialect == "sqlite":
         raw = engine.raw_connection()
@@ -38,18 +41,36 @@ def ensure_table():
             for stmt in statements:
                 conn.execute(text(stmt))
 
+def _normalize_period(period: str) -> str:
+    """
+    Accept 'YYYY-MM' or 'YYYY-MM-01' and return 'YYYY-MM-01'.
+    """
+    if period is None:
+        return None
+    period = str(period).strip()
+    if len(period) == 7:
+        return period + "-01"
+    if len(period) == 10:
+        return period
+    # try parse
+    try:
+        dt = pd.to_datetime(period, dayfirst=False, errors='coerce')
+        if pd.isna(dt):
+            return None
+        return dt.strftime("%Y-%m-01")
+    except Exception:
+        return None
+
 def upsert_entry(owner: str, period: str, patrimonio: float=None, cdi: float=None,
                  ipca: float=None, ibov: float=None, usd: float=None, carteira: float=None):
     """
-    period: 'YYYY-MM' or 'YYYY-MM-01' accepted. Will store as YYYY-MM-01.
+    Insert or update a monthly_series entry. period accepts 'YYYY-MM' or 'YYYY-MM-01'.
     """
     ensure_table()
-    # normalize period to first day
-    if len(period) == 7:
-        period = period + "-01"
-    period_dt = period
+    period_dt = _normalize_period(period)
+    if not period_dt:
+        raise ValueError("Período inválido. Use 'YYYY-MM' ou 'YYYY-MM-DD'.")
     with engine.begin() as conn:
-        # try update, else insert
         res = conn.execute(text("""
             SELECT id FROM monthly_series WHERE owner=:owner AND period=:period
         """), {"owner": owner, "period": period_dt}).fetchone()
@@ -71,7 +92,11 @@ def upsert_entry(owner: str, period: str, patrimonio: float=None, cdi: float=Non
                 VALUES (:owner, :period, :patrimonio, :cdi, :ipca, :ibov, :usd, :carteira)
             """), {"owner": owner, "period": period_dt, "patrimonio": patrimonio, "cdi": cdi, "ipca": ipca, "ibov": ibov, "usd": usd, "carteira": carteira})
 
-def list_entries(owner: str = None):
+def list_entries(owner: str = None) -> pd.DataFrame:
+    """
+    Return rows for an owner (or all owners if owner is None) ordered by period.
+    Period column is returned as datetime.
+    """
     ensure_table()
     q = "SELECT * FROM monthly_series"
     params = {}
@@ -81,13 +106,17 @@ def list_entries(owner: str = None):
     q += " ORDER BY period"
     try:
         with engine.connect() as conn:
-            return pd.read_sql(q, conn, params=params)
+            df = pd.read_sql(q, conn, params=params)
+            if not df.empty and 'period' in df.columns:
+                df['period'] = pd.to_datetime(df['period'])
+            return df
     except Exception:
         return pd.DataFrame()
 
-def aggregate_total(period_from: str = None, period_to: str = None):
+def aggregate_total(period_from: str = None, period_to: str = None) -> pd.DataFrame:
     """
     Return aggregated (sum) patrimonio and average of indices per period across all owners.
+    Optional period_from/period_to accept 'YYYY-MM' or 'YYYY-MM-01'.
     """
     ensure_table()
     q = """
@@ -104,14 +133,19 @@ def aggregate_total(period_from: str = None, period_to: str = None):
     if period_from or period_to:
         q += " WHERE 1=1"
         if period_from:
+            pf = _normalize_period(period_from)
             q += " AND period >= :pf"
-            params["pf"] = period_from if len(period_from)>7 else period_from + "-01"
+            params["pf"] = pf
         if period_to:
+            pt = _normalize_period(period_to)
             q += " AND period <= :pt"
-            params["pt"] = period_to if len(period_to)>7 else period_to + "-01"
+            params["pt"] = pt
     q += " GROUP BY period ORDER BY period"
     try:
         with engine.connect() as conn:
-            return pd.read_sql(q, conn, params=params)
+            df = pd.read_sql(q, conn, params=params)
+            if not df.empty and 'period' in df.columns:
+                df['period'] = pd.to_datetime(df['period'])
+            return df
     except Exception:
         return pd.DataFrame()

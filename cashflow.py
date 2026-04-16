@@ -326,4 +326,3 @@ def render_cash_ui():
             st.error(f"Erro ao salvar no banco: {e}")
 
     st.markdown("---")
-    st.info("Use o upload para atualizar os dados. Em produção, valide formatos e adicione autenticação antes de permitir uploads.")
