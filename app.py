@@ -398,32 +398,6 @@ def render_visao_geral():
     render_performance_infographic(owner_a="Paula Casale", owner_b="Adolfo Pacheco", months=12)
     st.markdown("---")
 
-    # --- Fluxo de Caixa summary (small preview) ---
-    st.caption("2) Fluxo de Caixa (resumo)")
-    if not df_transactions.empty:
-        df_tx = df_transactions.copy()
-        if "date" in df_tx.columns:
-            df_tx["date"] = pd.to_datetime(df_tx["date"], errors="coerce").dt.date
-        if "amount" in df_tx.columns:
-            df_daily = df_tx.groupby("date").agg(
-                entradas=("amount", lambda s: s[s>0].sum() if not s[s>0].empty else 0.0),
-                saidas=("amount", lambda s: -s[s<0].sum() if not s[s<0].empty else 0.0)
-            ).reset_index()
-            df_daily = df_daily.sort_values("date").tail(180)
-            fig2 = go.Figure()
-            fig2.add_trace(go.Bar(x=df_daily["date"], y=df_daily["entradas"], name="Entradas", marker_color="#2ca02c",
-                                  text=df_daily["entradas"].apply(format_brl), textposition="auto"))
-            fig2.add_trace(go.Bar(x=df_daily["date"], y=df_daily["saidas"], name="Saídas", marker_color="#d62728",
-                                  text=df_daily["saidas"].apply(format_brl), textposition="auto"))
-            fig2.update_layout(barmode='group', xaxis_title="Data", yaxis_title="Valor (R$)", height=420)
-            st.plotly_chart(fig2, width='stretch')
-        else:
-            st.info("Tabela transactions encontrada, mas sem coluna 'amount' para sumarizar.")
-    else:
-        st.info("Nenhum dado de transações disponível para resumo de fluxo de caixa.")
-
-    st.markdown("---")
-
 # ---------------- Tabs: call renderers only inside their with blocks ----------------
 with tab_visao:
     render_visao_geral()
