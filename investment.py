@@ -157,7 +157,8 @@ def render_controle_ui():
                     st.error(f"Falha ao adicionar ativo: {e}")
                 safe_rerun()
 
-        st.markdown("---")
+    with col_right:
+        
         st.subheader("Adicionar passivo / dívida")
         with st.form("form_add_liability_local", clear_on_submit=True):
             l_categoria = st.selectbox("Categoria (passivo)", ["Financiamento Imobiliário","Empréstimo Pessoal","Cartão de Crédito","Outros"], key="add_liab_cat")
@@ -185,7 +186,7 @@ def render_controle_ui():
         st.metric("Passivos Totais", _format_brl(total_liab))
         st.metric("Patrimônio Líquido", _format_brl(net_worth))
 
-    with col_right:
+        st.markdown("---")
         st.subheader("Visão dos Ativos")
 
         # Charts: distribution by type and by category
