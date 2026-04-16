@@ -6,12 +6,11 @@ from sqlalchemy import text
 from db import engine
 import time
 import uuid
+from datetime import date
+import io
 
-# utilitários compartilhados: garantir format_brl e safe_rerun
-from utils import safe_rerun, format_brl as format_brl
-_format_brl = format_brl
-
-# manter alias antigo para compatibilidade com código existente
+# utilitários compartilhados
+from utils import safe_rerun, format_brl
 _format_brl = format_brl
 
 # ---------------- Ensure assets schema (adds 'tipo' column if missing) ----------------
@@ -20,11 +19,15 @@ def ensure_assets_schema():
     Ensure the assets table has a 'tipo' column to store asset instrument type.
     This function is idempotent and safe to call on each import.
     """
-    dialect = engine.dialect.name.lower()
+    try:
+        dialect = engine.dialect.name.lower()
+    except Exception:
+        # engine not available; nothing to do
+        return
+
     try:
         if dialect == "sqlite":
             with engine.connect() as conn:
-                # check if table exists first
                 try:
                     res = conn.execute(text("PRAGMA table_info(assets)")).fetchall()
                     cols = [r[1] for r in res]
@@ -34,7 +37,6 @@ def ensure_assets_schema():
                     # table may not exist yet; ignore
                     pass
         else:
-            # For other DBs, try to add column if not exists (generic SQL)
             with engine.begin() as conn:
                 try:
                     conn.execute(text("ALTER TABLE assets ADD COLUMN tipo TEXT"))
@@ -42,13 +44,17 @@ def ensure_assets_schema():
                     # ignore if already exists or not supported
                     pass
     except Exception:
-        # non-fatal: UI will still work, but tipo may not be persisted
+        # non-fatal
         pass
 
 ensure_assets_schema()
 
 # ---------------- Read helpers ----------------
 def read_table_safe(name: str) -> pd.DataFrame:
+    """
+    Read a table safely. Returns empty DataFrame on any error.
+    Note: name is interpolated directly; ensure it's a trusted value.
+    """
     try:
         with engine.connect() as conn:
             return pd.read_sql(f"SELECT * FROM {name}", conn)
@@ -68,14 +74,12 @@ def list_liabilities() -> pd.DataFrame:
 def add_asset(categoria: str, tipo: str, descricao: str, valor: float, source: str = "manual_form", import_batch_id: str = None):
     ensure_assets_schema()
     with engine.begin() as conn:
-        # include tipo column if present
         try:
             conn.execute(text("""
                 INSERT INTO assets (categoria, tipo, descricao, valor, source, import_batch_id)
                 VALUES (:categoria, :tipo, :descricao, :valor, :source, :ib)
             """), {"categoria": categoria, "tipo": tipo, "descricao": descricao, "valor": valor, "source": source, "ib": import_batch_id})
         except Exception:
-            # fallback to insert without tipo if DB doesn't support it
             conn.execute(text("""
                 INSERT INTO assets (categoria, descricao, valor, source, import_batch_id)
                 VALUES (:categoria, :descricao, :valor, :source, :ib)
@@ -142,6 +146,168 @@ def aggregate_liabilities_by_category() -> pd.DataFrame:
         return pd.DataFrame(columns=["categoria", "valor"])
     return df.groupby("categoria", as_index=False)["valor"].sum()
 
+# ---------------- Portfolio snapshots support ----------------
+def ensure_portfolio_schema():
+    """
+    Create portfolio_snapshots table if not exists.
+    """
+    try:
+        dialect = engine.dialect.name.lower()
+    except Exception:
+        return
+    try:
+        with engine.begin() as conn:
+            if dialect == "sqlite":
+                conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner TEXT NOT NULL,
+                    snapshot_date DATE NOT NULL,
+                    asset_id TEXT,
+                    descricao TEXT,
+                    categoria TEXT,
+                    saldo NUMERIC NOT NULL,
+                    alocacao NUMERIC,
+                    import_batch_id TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_portfolio_owner_date ON portfolio_snapshots(owner, snapshot_date)"))
+            else:
+                try:
+                    conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+                        id SERIAL PRIMARY KEY,
+                        owner TEXT NOT NULL,
+                        snapshot_date DATE NOT NULL,
+                        asset_id TEXT,
+                        descricao TEXT,
+                        categoria TEXT,
+                        saldo NUMERIC NOT NULL,
+                        alocacao NUMERIC,
+                        import_batch_id TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """))
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_portfolio_owner_date ON portfolio_snapshots(owner, snapshot_date)"))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+ensure_portfolio_schema()
+
+def _normalize_snapshot_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None:
+        return pd.DataFrame()
+    df2 = df.copy()
+    col_map = {}
+    for c in df2.columns:
+        lc = c.lower().strip()
+        if lc in ("descricao","description","asset","ativo","nome"):
+            col_map[c] = "descricao"
+        elif lc in ("categoria","category","type","tipo"):
+            col_map[c] = "categoria"
+        elif lc in ("saldo","balance","valor","valor (r$)","saldo atual"):
+            col_map[c] = "saldo"
+        elif lc in ("alocacao","alocação","allocation","pct","percent"):
+            col_map[c] = "alocacao"
+        elif lc in ("asset_id","ticker","codigo","symbol"):
+            col_map[c] = "asset_id"
+    df2 = df2.rename(columns=col_map)
+    if "saldo" not in df2.columns:
+        numeric_candidates = [c for c in df2.columns if pd.api.types.is_numeric_dtype(df2[c])]
+        if numeric_candidates:
+            df2 = df2.rename(columns={numeric_candidates[0]: "saldo"})
+    if "saldo" in df2.columns:
+        df2["saldo"] = df2["saldo"].astype(str).str.replace(r"[R$\s]", "", regex=True).str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
+        df2["saldo"] = pd.to_numeric(df2["saldo"], errors="coerce").fillna(0.0)
+    if "alocacao" in df2.columns:
+        df2["alocacao"] = df2["alocacao"].astype(str).str.replace("%","").str.replace(",", ".")
+        df2["alocacao"] = pd.to_numeric(df2["alocacao"], errors="coerce").fillna(None)
+    return df2
+
+def save_portfolio_snapshot(df: pd.DataFrame, owner: str, snapshot_date: date, import_batch_id: str = None) -> int:
+    if df is None or df.empty:
+        return 0
+    df2 = _normalize_snapshot_df(df)
+    if "saldo" not in df2.columns:
+        raise ValueError("Coluna de saldo não encontrada no DataFrame.")
+    inserted = 0
+    with engine.begin() as conn:
+        for _, r in df2.iterrows():
+            try:
+                conn.execute(text("""
+                    INSERT INTO portfolio_snapshots (owner, snapshot_date, asset_id, descricao, categoria, saldo, alocacao, import_batch_id)
+                    VALUES (:owner, :snapshot_date, :asset_id, :descricao, :categoria, :saldo, :alocacao, :ib)
+                """), {
+                    "owner": owner,
+                    "snapshot_date": snapshot_date,
+                    "asset_id": r.get("asset_id"),
+                    "descricao": r.get("descricao"),
+                    "categoria": r.get("categoria"),
+                    "saldo": float(r["saldo"]),
+                    "alocacao": float(r["alocacao"]) if r.get("alocacao") is not None else None,
+                    "ib": import_batch_id
+                })
+                inserted += 1
+            except Exception:
+                continue
+    return inserted
+
+def import_portfolio_file(file_like, owner: str, snapshot_date: date = None, import_batch_id: str = None) -> dict:
+    if snapshot_date is None:
+        snapshot_date = date.today()
+    try:
+        name = getattr(file_like, "name", "")
+        if isinstance(file_like, str) and file_like.lower().endswith(".csv"):
+            df = pd.read_csv(file_like)
+        elif isinstance(file_like, str) and (file_like.lower().endswith(".xls") or file_like.lower().endswith(".xlsx")):
+            df = pd.read_excel(file_like, sheet_name=0)
+        else:
+            if str(name).lower().endswith(".csv"):
+                df = pd.read_csv(file_like)
+            else:
+                df = pd.read_excel(file_like, sheet_name=0)
+    except Exception as e:
+        return {"inserted": 0, "errors": 1, "error": f"Falha ao ler arquivo: {e}"}
+    try:
+        n = save_portfolio_snapshot(df, owner, snapshot_date, import_batch_id=import_batch_id)
+        return {"inserted": n, "errors": 0}
+    except Exception as e:
+        return {"inserted": 0, "errors": 1, "error": str(e)}
+
+def get_portfolio_by_owner_date(owner: str, snapshot_date: date) -> pd.DataFrame:
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql(text("SELECT * FROM portfolio_snapshots WHERE owner = :owner AND snapshot_date = :sd"), conn, params={"owner": owner, "sd": snapshot_date})
+            return df
+    except Exception:
+        return pd.DataFrame()
+
+def sync_assets_from_snapshot(owner: str, snapshot_date: date, upsert_assets: bool = True, import_batch_id: str = None) -> int:
+    df = get_portfolio_by_owner_date(owner, snapshot_date)
+    if df.empty:
+        return 0
+    upserted = 0
+    with engine.begin() as conn:
+        for _, r in df.iterrows():
+            descricao = r.get("descricao") or r.get("asset_id") or "Sem descrição"
+            categoria = r.get("categoria") or "Investimentos"
+            valor = float(r.get("saldo") or 0.0)
+            try:
+                existing = conn.execute(text("SELECT id FROM assets WHERE descricao = :d LIMIT 1"), {"d": descricao}).fetchone()
+                if existing:
+                    conn.execute(text("UPDATE assets SET categoria=:categoria, valor=:valor, source='snapshot', import_batch_id=:ib WHERE id=:id"),
+                                 {"categoria": categoria, "valor": valor, "ib": import_batch_id, "id": existing[0]})
+                else:
+                    conn.execute(text("INSERT INTO assets (categoria, descricao, valor, source, import_batch_id) VALUES (:categoria, :descricao, :valor, 'snapshot', :ib)"),
+                                 {"categoria": categoria, "descricao": descricao, "valor": valor, "ib": import_batch_id})
+                upserted += 1
+            except Exception:
+                continue
+    return upserted
+
 # ---------------- Render function moved to this module ----------------
 def render_controle_ui():
     st.header("Controle de Investimentos")
@@ -151,6 +317,7 @@ def render_controle_ui():
 
     asset_types = ["Fundo de Investimento", "CDB", "LCI", "LCA", "Selic", "ETC", "COE", "Ações", "Outros"]
 
+    # Left column: add asset form
     with col_left:
         st.subheader("Adicionar bem / ativo")
         with st.form("form_add_asset_local", clear_on_submit=True):
@@ -160,7 +327,6 @@ def render_controle_ui():
             a_valor = st.number_input("Valor (R$)", min_value=0.0, step=100.0, format="%.2f", key="add_val")
             submitted_asset = st.form_submit_button("Adicionar ativo")
             if submitted_asset:
-                # validação mínima
                 if not a_descricao:
                     st.error("Descrição é obrigatória.")
                 elif a_valor <= 0:
@@ -174,6 +340,7 @@ def render_controle_ui():
                         st.error(f"Falha ao adicionar ativo: {e}")
                     safe_rerun()
 
+    # Right column: add liability form and optional portfolio import
     with col_right:
         st.subheader("Adicionar passivo / dívida")
         with st.form("form_add_liability_local", clear_on_submit=True):
@@ -195,6 +362,32 @@ def render_controle_ui():
                         st.error(f"Falha ao adicionar passivo: {e}")
                     safe_rerun()
 
+        # Optional: import portfolio snapshot form (submit button included)
+        st.markdown("---")
+        st.subheader("Importar snapshot de carteira")
+        with st.form("form_import_portfolio", clear_on_submit=True):
+            owner = st.selectbox("Owner", ["Paula Casale", "Adolfo Pacheco"], index=0, key="import_owner")
+            snapshot_date = st.date_input("Data do snapshot", value=date.today(), key="import_date")
+            uploaded = st.file_uploader("Arquivo CSV/XLSX", type=["csv","xlsx"], key="import_file")
+            import_submit = st.form_submit_button("Importar snapshot")
+            if import_submit:
+                if uploaded is None:
+                    st.error("Envie um arquivo CSV ou XLSX.")
+                else:
+                    import_batch_id = f"portfolio_{owner}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+                    try:
+                        res = import_portfolio_file(uploaded, owner=owner, snapshot_date=snapshot_date, import_batch_id=import_batch_id)
+                        if res.get("errors", 1) == 0:
+                            st.success(f"{res.get('inserted',0)} linhas importadas.")
+                            synced = sync_assets_from_snapshot(owner, snapshot_date, import_batch_id=import_batch_id)
+                            if synced:
+                                st.info(f"{synced} assets sincronizados a partir do snapshot.")
+                        else:
+                            st.error(f"Falha na importação: {res.get('error')}")
+                    except Exception as e:
+                        st.error(f"Erro ao importar snapshot: {e}")
+                    safe_rerun()
+
     st.markdown("---")
     # Quick KPIs for assets by type
     st.subheader("Resumo rápido")
@@ -202,15 +395,15 @@ def render_controle_ui():
     df_liab = list_liabilities()
 
     # garantir colunas
-    if df_assets.empty or "valor" not in df_assets.columns:
+    if df_assets is None or df_assets.empty or "valor" not in df_assets.columns:
         total_assets = 0.0
     else:
-        total_assets = float(df_assets["valor"].astype(float).sum())
+        total_assets = float(pd.to_numeric(df_assets["valor"], errors="coerce").fillna(0.0).sum())
 
-    if df_liab.empty or "valor" not in df_liab.columns:
+    if df_liab is None or df_liab.empty or "valor" not in df_liab.columns:
         total_liab = 0.0
     else:
-        total_liab = float(df_liab["valor"].astype(float).sum())
+        total_liab = float(pd.to_numeric(df_liab["valor"], errors="coerce").fillna(0.0).sum())
 
     net_worth = total_assets - total_liab
     st.metric("Ativos Totais", format_brl(total_assets))
@@ -222,7 +415,7 @@ def render_controle_ui():
 
     # Charts: distribution by type and by category
     df_assets = list_assets()
-    if df_assets.empty or "valor" not in df_assets.columns:
+    if df_assets is None or df_assets.empty or "valor" not in df_assets.columns:
         st.info("Nenhum ativo registrado ainda.")
         return
 
@@ -285,7 +478,6 @@ def render_controle_ui():
     for c in ["id", "categoria", "tipo", "descricao", "valor_fmt"]:
         if c in display.columns:
             display_cols.append(c)
-    # rename valor_fmt to valor for display
     if "valor_fmt" in display_cols:
         display = display.rename(columns={"valor_fmt": "valor"})
         display_cols = [c if c != "valor_fmt" else "valor" for c in display_cols]
@@ -293,7 +485,6 @@ def render_controle_ui():
 
     # Expanders for each asset to edit/delete
     st.markdown("#### Editar / Remover ativos")
-    # garantir coluna id para edição
     if "id" not in df_filtered.columns:
         st.info("Ativos sem identificador (id) não podem ser editados via UI.")
     else:
@@ -369,7 +560,6 @@ def render_controle_ui():
             df_h["descricao"] = df_h.get("asset_symbol", "")
             parts.append(df_h[["categoria","descricao","valor"]])
         if df_assets is not None and not df_assets.empty:
-            # garantir colunas
             cols = [c for c in ["categoria","descricao","valor"] if c in df_assets.columns]
             if cols:
                 parts.append(df_assets[cols])
