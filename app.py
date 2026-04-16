@@ -17,9 +17,9 @@ from data_series import upsert_entry, list_entries, aggregate_total, ensure_tabl
 ensure_series_table()
 
 # Import UI renderers and data functions from modules
-from ips import render_ips
+from ips import render_ips, load_latest_ips, save_ips
 from investment import (
-    render_controle_ui,
+    render_controle,
     list_holdings, list_assets, list_liabilities,
     add_asset, update_asset, delete_asset,
     add_liability, update_liability, delete_liability,
@@ -40,12 +40,9 @@ def format_brl(value):
 st.set_page_config(page_title="StreamDash — Finanças Pessoais", layout="wide")
 st.title("StreamDash — Finanças Pessoais")
 
-# ---------------- Top navigation as tabs ----------------
-tab_visao, tab_ips, tab_controle = st.tabs(["Visão Geral", "IPS", "Controle de Investimentos"])
-
-# ---------------- Shared sidebar: upload + series (kept minimal) ----------------
-st.sidebar.title("Ferramentas")
-st.sidebar.header("Upload e processamento")
+# ---------------- Sidebar: upload and forms ----------------
+st.sidebar.title("Adolfo Pacheco")
+st.sidebar.header("Upload")
 uploaded = st.sidebar.file_uploader("Envie CSV ou XLSX (um por vez)", type=["csv","xlsx"])
 mapping_df = load_mapping("mappings.csv")
 
@@ -81,7 +78,7 @@ if uploaded:
             record_upload_result(import_batch_id, file_name, rows_staged, rows_promoted, "processed")
             st.sidebar.success(f"Arquivo processado. Linhas promovidas: {rows_promoted}")
 
-# Sidebar: monthly series quick form and CSV import (kept in sidebar)
+# ---------------- Sidebar: monthly series UI ----------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("Séries mensais (Paula / Adolfo)")
 owner_sel = st.sidebar.selectbox("Investidor", ["Paula Casale", "Adolfo Pacheco"], key="series_owner")
@@ -110,142 +107,8 @@ if csv_file:
     except Exception as e:
         st.sidebar.error(f"Falha ao importar CSV: {e}")
 
-# ---------------- Visão Geral tab ----------------
-with tab_visao:
-    st.subheader("Visão Geral")
-
-    # Tentar ler transactions e snapshots do DB
-    try:
-        with engine.connect() as conn:
-            df_transactions = pd.read_sql("SELECT * FROM transactions", conn)
-    except Exception:
-        df_transactions = pd.DataFrame()
-    try:
-        with engine.connect() as conn:
-            df_snapshots = pd.read_sql("SELECT * FROM net_worth_snapshots", conn)
-    except Exception:
-        df_snapshots = pd.DataFrame()
-
-    # Se houver snapshots, usar para evolução do patrimônio; senão, fallback mocks
-    if not df_snapshots.empty:
-        df_evol_real = df_snapshots.sort_values("snapshot_date").rename(columns={"snapshot_date":"date","net_worth":"Patrimônio"})
-        df_evol_plot = df_evol_real[["date","Patrimônio"]].copy()
-        base = float(df_evol_plot["Patrimônio"].iloc[0])
-        n = len(df_evol_plot)
-        cdi = base * (1 + np.cumsum(np.repeat(0.0003, n)))
-        renda_fixa = base * (1 + np.cumsum(np.repeat(0.0005, n)))
-        indj26 = base * (1 + np.cumsum(np.random.normal(0.0002, 0.001, n)))
-        df_evol_plot["CDI"] = cdi
-        df_evol_plot["Renda Fixa"] = renda_fixa
-        df_evol_plot["INDJ26"] = indj26
-        df_plot = df_evol_plot.melt(id_vars=["date"], var_name="serie", value_name="valor")
-    else:
-        np.random.seed(42)
-        today = datetime.today().date()
-        dates = pd.date_range(end=today, periods=180).to_pydatetime().tolist()
-        patrimonio = np.cumsum(np.random.normal(loc=50, scale=200, size=len(dates))) + 100000
-        cdi = 100000 * (1 + np.cumsum(np.repeat(0.0003, len(dates))))
-        renda_fixa = 100000 * (1 + np.cumsum(np.repeat(0.0005, len(dates))))
-        indj26 = 100000 * (1 + np.cumsum(np.random.normal(0.0002, 0.001, len(dates))))
-        df_plot = pd.DataFrame({
-            "date": dates,
-            "Patrimônio": patrimonio,
-            "CDI": cdi,
-            "Renda Fixa": renda_fixa,
-            "INDJ26": indj26
-        }).melt(id_vars=["date"], var_name="serie", value_name="valor")
-
-    # Plot 1: evolução do patrimônio (global)
-    st.caption("1) Evolução do Patrimônio vs CDI / Renda Fixa / IBOV")
-    fig1 = px.line(df_plot, x="date", y="valor", color="serie",
-                   labels={"date":"Data","valor":"Valor (R$)","serie":"Série"})
-    fig1.update_layout(height=420, legend_title_text="Séries", margin=dict(t=40, b=40, l=40, r=40))
-    st.plotly_chart(fig1, use_container_width=True)
-    st.markdown("---")
-
-    # --- New: load monthly series for Paula and Adolfo and plot them ---
-    df_paula = list_entries("Paula Casale")
-    df_adolfo = list_entries("Adolfo Pacheco")
-    df_total = aggregate_total()
-
-    def _prepare(df):
-        if df is None or df.empty:
-            return pd.DataFrame()
-        df = df.copy()
-        df['period'] = pd.to_datetime(df['period'])
-        df['patrimonio'] = pd.to_numeric(df.get('patrimonio', 0), errors='coerce').fillna(0.0)
-        for col in ['cdi','ipca','ibov','usd','carteira']:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            else:
-                df[col] = np.nan
-        return df.sort_values('period')
-
-    df_paula = _prepare(df_paula)
-    df_adolfo = _prepare(df_adolfo)
-    df_total = _prepare(df_total)
-
-    # Plot: individual patrimonies + total
-    st.caption("Evolução Patrimonial por Investidor")
-    fig_personal = go.Figure()
-    if not df_paula.empty:
-        fig_personal.add_trace(go.Scatter(x=df_paula['period'], y=df_paula['patrimonio'],
-                                          mode='lines+markers', name='Paula Casale',
-                                          hovertemplate='%{x|%Y-%m}: %{y:$,.2f}<extra></extra>'))
-    if not df_adolfo.empty:
-        fig_personal.add_trace(go.Scatter(x=df_adolfo['period'], y=df_adolfo['patrimonio'],
-                                          mode='lines+markers', name='Adolfo Pacheco',
-                                          hovertemplate='%{x|%Y-%m}: %{y:$,.2f}<extra></extra>'))
-    if not df_total.empty:
-        fig_personal.add_trace(go.Scatter(x=df_total['period'], y=df_total['patrimonio'],
-                                          mode='lines+markers', name='Total (soma)',
-                                          line=dict(width=2, dash='dash'),
-                                          hovertemplate='%{x|%Y-%m}: %{y:$,.2f}<extra></extra>'))
-    if fig_personal.data:
-        fig_personal.update_layout(xaxis_title="Período", yaxis_title="Patrimônio (R$)", height=420)
-        st.plotly_chart(fig_personal, use_container_width=True)
-    else:
-        st.info("Nenhum dado mensal de patrimônio encontrado para Paula ou Adolfo.")
-
-    st.markdown("---")
-
-    # Plot: indices (CDI, IPCA, IBOV, USD, Carteira)
-    st.caption("Variações mensais: CDI / IPCA / IBOV / USD / Carteira")
-    fig_indices = go.Figure()
-    def add_index_traces(df, owner_label, dash=None):
-        if df.empty:
-            return
-        for col, label in [('cdi','CDI'), ('ipca','IPCA'), ('ibov','IBOV'), ('usd','USD'), ('carteira','Carteira')]:
-            if col in df.columns and df[col].notna().any():
-                fig_indices.add_trace(go.Scatter(
-                    x=df['period'], y=df[col],
-                    mode='lines+markers',
-                    name=f"{label} - {owner_label}",
-                    line=dict(dash=dash) if dash else None,
-                    hovertemplate='%{x|%Y-%m}: %{y:.4f}<extra></extra>'
-                ))
-
-    add_index_traces(df_paula, "Paula Casale", dash=None)
-    add_index_traces(df_adolfo, "Adolfo Pacheco", dash='dash')
-    add_index_traces(df_total, "Média (Total)", dash='dot')
-
-    if fig_indices.data:
-        fig_indices.update_layout(xaxis_title="Período", yaxis_title="Variação (pct ou dec)", height=420)
-        st.plotly_chart(fig_indices, use_container_width=True)
-    else:
-        st.info("Nenhum dado de variações mensais (CDI/IPCA/IBOV/USD/Carteira) encontrado.")
-
-    st.markdown("---")
-    # (rest of Visão Geral continues: fluxo, despesas, composição, KPIs)
-    # For brevity the rest of the existing Visão Geral content is kept as before.
-
-# ---------------- IPS tab ----------------
-with tab_ips:
-    render_ips()
-
-# ---------------- Controle de Investimentos tab ----------------
-with tab_controle:
-    render_controle_ui()
+# ---------------- Page navigation ----------------
+page = st.sidebar.radio("Navegação", ["Visão Geral", "IPS", "Controle de Investimentos"], index=0)
 
 # ---------------- Visão Geral page ----------------
 def render_visao_geral():
@@ -575,3 +438,17 @@ def render_visao_geral():
 
     st.markdown("---")
     st.info("Formulários e controles de edição estão no sidebar. Para produção, adicione autenticação, validação e backups.")
+
+# ---------------- IPS page ----------------
+# IPS rendering moved to ips.render_ips
+
+# ---------------- Controle de Investimentos page ----------------
+# Controle rendering moved to investment.render_controle
+
+# ---------------- Render selected page ----------------
+if page == "Visão Geral":
+    render_visao_geral()
+elif page == "IPS":
+    render_ips()
+elif page == "Controle de Investimentos":
+    render_controle()
