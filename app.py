@@ -189,107 +189,107 @@ def render_performance_infographic(owner_a="Paula Casale", owner_b="Adolfo Pache
     fig.update_traces(hovertemplate='%{x|%b/%y}: %{y:.2%}')
     st.plotly_chart(fig, width='stretch')
 
-# ---------------- Visão Geral tab ----------------
-with tab_visao:
-    st.subheader("Visão Geral")
+    # ---------------- Visão Geral tab ----------------
+    with tab_visao:
+        st.subheader("Visão Geral")
 
-    # Evolução do patrimônio (global) — usar soma dos owners quando disponível
-if True:
-    # tentar carregar snapshots e séries agregadas
-    try:
-        with engine.connect() as conn:
-            df_snapshots = pd.read_sql("SELECT * FROM net_worth_snapshots", conn)
-    except Exception:
-        df_snapshots = pd.DataFrame()
+        # Evolução do patrimônio (global) — usar soma dos owners quando disponível
+    if True:
+        # tentar carregar snapshots e séries agregadas
+        try:
+            with engine.connect() as conn:
+                df_snapshots = pd.read_sql("SELECT * FROM net_worth_snapshots", conn)
+        except Exception:
+            df_snapshots = pd.DataFrame()
 
-    # carregar séries agregadas (soma de patrimônios por período)
-    try:
-        df_total_series = aggregate_total()  # já retorna period, patrimonio, cdi, ipca, ibov, usd, carteira
-    except Exception:
-        df_total_series = pd.DataFrame()
+        # carregar séries agregadas (soma de patrimônios por período)
+        try:
+            df_total_series = aggregate_total()  # já retorna period, patrimonio, cdi, ipca, ibov, usd, carteira
+        except Exception:
+            df_total_series = pd.DataFrame()
 
-    # preparar df_plot com prioridade: snapshots (diário) se existirem, senão séries mensais expandidas
-    if not df_snapshots.empty:
-        # usar snapshots para série diária real
-        df_evol_real = df_snapshots.sort_values("snapshot_date").rename(columns={"snapshot_date": "date", "net_worth": "Patrimônio"})
-        df_evol_plot = df_evol_real[["date", "Patrimônio"]].copy()
+        # preparar df_plot com prioridade: snapshots (diário) se existirem, senão séries mensais expandidas
+        if not df_snapshots.empty:
+            # usar snapshots para série diária real
+            df_evol_real = df_snapshots.sort_values("snapshot_date").rename(columns={"snapshot_date": "date", "net_worth": "Patrimônio"})
+            df_evol_plot = df_evol_real[["date", "Patrimônio"]].copy()
 
-        # se tivermos séries agregadas, adicionar CDI e Renda Fixa a partir de df_total_series (interpolando mensal -> diário)
-        if not df_total_series.empty and "period" in df_total_series.columns:
-            # transformar period (primeiro dia do mês) em índice e reindexar para datas diárias
-            df_idx = df_total_series.copy()
-            df_idx['period'] = pd.to_datetime(df_idx['period'])
-            df_idx = df_idx.set_index('period').sort_index()
-            # criar índice diário cobrindo o intervalo dos snapshots
-            date_index = pd.date_range(start=df_evol_plot['date'].min(), end=df_evol_plot['date'].max(), freq='D')
-            df_daily_idx = df_idx.reindex(df_idx.index.union(date_index)).sort_index()
-            # forward-fill/linear interpolate índices numéricos
-            for col in ['cdi', 'ipca', 'ibov', 'usd', 'carteira']:
-                if col in df_daily_idx.columns:
-                    df_daily_idx[col] = pd.to_numeric(df_daily_idx[col], errors='coerce').interpolate(method='time').ffill().bfill()
-            # extrair apenas o índice diário alinhado ao date_index
-            df_indices_daily = df_daily_idx.reindex(date_index).reset_index().rename(columns={'index':'date'})
-            # anexar CDI e Carteira (mocks) ao df_evol_plot por join em date
-            df_evol_plot = df_evol_plot.merge(df_indices_daily[['date','cdi','carteira']], on='date', how='left')
+            # se tivermos séries agregadas, adicionar CDI e Renda Fixa a partir de df_total_series (interpolando mensal -> diário)
+            if not df_total_series.empty and "period" in df_total_series.columns:
+                # transformar period (primeiro dia do mês) em índice e reindexar para datas diárias
+                df_idx = df_total_series.copy()
+                df_idx['period'] = pd.to_datetime(df_idx['period'])
+                df_idx = df_idx.set_index('period').sort_index()
+                # criar índice diário cobrindo o intervalo dos snapshots
+                date_index = pd.date_range(start=df_evol_plot['date'].min(), end=df_evol_plot['date'].max(), freq='D')
+                df_daily_idx = df_idx.reindex(df_idx.index.union(date_index)).sort_index()
+                # forward-fill/linear interpolate índices numéricos
+                for col in ['cdi', 'ipca', 'ibov', 'usd', 'carteira']:
+                    if col in df_daily_idx.columns:
+                        df_daily_idx[col] = pd.to_numeric(df_daily_idx[col], errors='coerce').interpolate(method='time').ffill().bfill()
+                # extrair apenas o índice diário alinhado ao date_index
+                df_indices_daily = df_daily_idx.reindex(date_index).reset_index().rename(columns={'index':'date'})
+                # anexar CDI e Carteira (mocks) ao df_evol_plot por join em date
+                df_evol_plot = df_evol_plot.merge(df_indices_daily[['date','cdi','carteira']], on='date', how='left')
+            else:
+                # sem séries agregadas, criar mocks simples para comparação
+                base = float(df_evol_plot["Patrimônio"].iloc[0])
+                n = len(df_evol_plot)
+                df_evol_plot["cdi"] = base * (1 + np.cumsum(np.repeat(0.0003, n)))
+                df_evol_plot["carteira"] = df_evol_plot["Patrimônio"]
         else:
-            # sem séries agregadas, criar mocks simples para comparação
-            base = float(df_evol_plot["Patrimônio"].iloc[0])
-            n = len(df_evol_plot)
-            df_evol_plot["cdi"] = base * (1 + np.cumsum(np.repeat(0.0003, n)))
-            df_evol_plot["carteira"] = df_evol_plot["Patrimônio"]
-    else:
-        # sem snapshots: tentar usar df_total_series (mensal) e expandir para diário
-        if not df_total_series.empty and "period" in df_total_series.columns:
-            df_ts = df_total_series.copy()
-            df_ts['period'] = pd.to_datetime(df_ts['period'])
-            # usar patrimonio agregado como série principal
-            df_ts = df_ts[['period','patrimonio','cdi','carteira']].rename(columns={'period':'date','patrimonio':'Patrimônio'})
-            # expandir para diário por forward-fill
-            df_ts = df_ts.set_index('date').sort_index()
-            date_index = pd.date_range(start=df_ts.index.min(), end=df_ts.index.max(), freq='D')
-            df_daily = df_ts.reindex(df_ts.index.union(date_index)).sort_index()
-            df_daily[['Patrimônio','cdi','carteira']] = df_daily[['Patrimônio','cdi','carteira']].interpolate(method='time').ffill().bfill()
-            df_evol_plot = df_daily.reindex(date_index).reset_index().rename(columns={'index':'date'})
-        else:
-            # fallback: gerar mocks diários
-            np.random.seed(42)
-            today = datetime.today().date()
-            dates = pd.date_range(end=today, periods=180).to_pydatetime().tolist()
-            patrimonio = np.cumsum(np.random.normal(loc=50, scale=200, size=len(dates))) + 100000
-            cdi = 100000 * (1 + np.cumsum(np.repeat(0.0003, len(dates))))
-            carteira = patrimonio.copy()
-            df_evol_plot = pd.DataFrame({"date": dates, "Patrimônio": patrimonio, "cdi": cdi, "carteira": carteira})
+            # sem snapshots: tentar usar df_total_series (mensal) e expandir para diário
+            if not df_total_series.empty and "period" in df_total_series.columns:
+                df_ts = df_total_series.copy()
+                df_ts['period'] = pd.to_datetime(df_ts['period'])
+                # usar patrimonio agregado como série principal
+                df_ts = df_ts[['period','patrimonio','cdi','carteira']].rename(columns={'period':'date','patrimonio':'Patrimônio'})
+                # expandir para diário por forward-fill
+                df_ts = df_ts.set_index('date').sort_index()
+                date_index = pd.date_range(start=df_ts.index.min(), end=df_ts.index.max(), freq='D')
+                df_daily = df_ts.reindex(df_ts.index.union(date_index)).sort_index()
+                df_daily[['Patrimônio','cdi','carteira']] = df_daily[['Patrimônio','cdi','carteira']].interpolate(method='time').ffill().bfill()
+                df_evol_plot = df_daily.reindex(date_index).reset_index().rename(columns={'index':'date'})
+            else:
+                # fallback: gerar mocks diários
+                np.random.seed(42)
+                today = datetime.today().date()
+                dates = pd.date_range(end=today, periods=180).to_pydatetime().tolist()
+                patrimonio = np.cumsum(np.random.normal(loc=50, scale=200, size=len(dates))) + 100000
+                cdi = 100000 * (1 + np.cumsum(np.repeat(0.0003, len(dates))))
+                carteira = patrimonio.copy()
+                df_evol_plot = pd.DataFrame({"date": dates, "Patrimônio": patrimonio, "cdi": cdi, "carteira": carteira})
 
-    # garantir colunas numéricas
-    for col in ["Patrimônio","cdi","carteira"]:
-        if col in df_evol_plot.columns:
-            df_evol_plot[col] = pd.to_numeric(df_evol_plot[col], errors='coerce')
+        # garantir colunas numéricas
+        for col in ["Patrimônio","cdi","carteira"]:
+            if col in df_evol_plot.columns:
+                df_evol_plot[col] = pd.to_numeric(df_evol_plot[col], errors='coerce')
 
-    # montar gráfico: Patrimônio (soma) vs CDI (linha de referência) vs Carteira (índice)
-    fig1 = go.Figure()
-    if "Patrimônio" in df_evol_plot.columns:
-        fig1.add_trace(go.Scatter(x=df_evol_plot['date'], y=df_evol_plot['Patrimônio'],
-                                  mode='lines+markers', name='Patrimônio (soma)',
-                                  line=dict(color='#1f77b4', width=2),
-                                  hovertemplate='%{x|%Y-%m-%d}: %{y:$,.2f}<extra></extra>'))
-    if "cdi" in df_evol_plot.columns:
-        # se cdi estiver em variação (pct), transformar para escala de patrimônio se necessário; aqui assumimos já em nível compatível
-        fig1.add_trace(go.Scatter(x=df_evol_plot['date'], y=df_evol_plot['cdi'],
-                                  mode='lines', name='CDI (referência)',
-                                  line=dict(color='#ff7f0e', width=2, dash='dash'),
-                                  hovertemplate='%{x|%Y-%m-%d}: %{y:$,.2f}<extra></extra>'))
-    if "carteira" in df_evol_plot.columns:
-        fig1.add_trace(go.Scatter(x=df_evol_plot['date'], y=df_evol_plot['carteira'],
-                                  mode='lines', name='Carteira (índice)',
-                                  line=dict(color='#636efa', width=2, dash='dot'),
-                                  hovertemplate='%{x|%Y-%m-%d}: %{y:$,.2f}<extra></extra>'))
+        # montar gráfico: Patrimônio (soma) vs CDI (linha de referência) vs Carteira (índice)
+        fig1 = go.Figure()
+        if "Patrimônio" in df_evol_plot.columns:
+            fig1.add_trace(go.Scatter(x=df_evol_plot['date'], y=df_evol_plot['Patrimônio'],
+                                    mode='lines+markers', name='Patrimônio (soma)',
+                                    line=dict(color='#1f77b4', width=2),
+                                    hovertemplate='%{x|%Y-%m-%d}: %{y:$,.2f}<extra></extra>'))
+        if "cdi" in df_evol_plot.columns:
+            # se cdi estiver em variação (pct), transformar para escala de patrimônio se necessário; aqui assumimos já em nível compatível
+            fig1.add_trace(go.Scatter(x=df_evol_plot['date'], y=df_evol_plot['cdi'],
+                                    mode='lines', name='CDI (referência)',
+                                    line=dict(color='#ff7f0e', width=2, dash='dash'),
+                                    hovertemplate='%{x|%Y-%m-%d}: %{y:$,.2f}<extra></extra>'))
+        if "carteira" in df_evol_plot.columns:
+            fig1.add_trace(go.Scatter(x=df_evol_plot['date'], y=df_evol_plot['carteira'],
+                                    mode='lines', name='Carteira (índice)',
+                                    line=dict(color='#636efa', width=2, dash='dot'),
+                                    hovertemplate='%{x|%Y-%m-%d}: %{y:$,.2f}<extra></extra>'))
 
-    fig1.update_layout(title="Evolução do Patrimônio vs CDI / Carteira",
-                       xaxis_title="Data", yaxis_title="Valor (R$)",
-                       height=420, legend_title_text="Séries", margin=dict(t=40,b=40,l=40,r=40))
-    st.caption("1) Evolução do Patrimônio vs CDI / Carteira (soma dos owners quando disponível)")
-    st.plotly_chart(fig1, use_container_width=True)
-    st.markdown("---")
+        fig1.update_layout(title="Evolução do Patrimônio vs CDI / Carteira",
+                        xaxis_title="Data", yaxis_title="Valor (R$)",
+                        height=420, legend_title_text="Séries", margin=dict(t=40,b=40,l=40,r=40))
+        st.caption("1) Evolução do Patrimônio vs CDI / Carteira (soma dos owners quando disponível)")
+        st.plotly_chart(fig1, use_container_width=True)
+        st.markdown("---")
 
 #----------------- Fluxo de Caixa tab ----------------
 with tab_cash:
