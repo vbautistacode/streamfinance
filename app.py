@@ -12,6 +12,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 from sqlalchemy import text
 
+# data series module (monthly series per owner)
+from data_series import upsert_entry, list_entries, aggregate_total, ensure_table as ensure_series_table
+ensure_series_table()
+
 # Import UI renderers and data functions from modules
 from ips import render_ips, load_latest_ips, save_ips
 from investment import (
@@ -74,6 +78,7 @@ if uploaded:
             record_upload_result(import_batch_id, file_name, rows_staged, rows_promoted, "processed")
             st.sidebar.success(f"Arquivo processado. Linhas promovidas: {rows_promoted}")
 
+# ---------------- Sidebar: quick manual add forms ----------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("Adicionar bem / ativo")
 with st.sidebar.form("form_add_asset", clear_on_submit=True):
@@ -159,6 +164,35 @@ if not df_liabilities_manual.empty:
 else:
     st.sidebar.info("Nenhum passivo manual registrado.")
 
+# ---------------- Sidebar: monthly series UI ----------------
+st.sidebar.markdown("---")
+st.sidebar.subheader("Séries mensais (Paula / Adolfo)")
+owner_sel = st.sidebar.selectbox("Investidor", ["Paula Casale", "Adolfo Pacheco"], key="series_owner")
+period_input = st.sidebar.text_input("Período (YYYY-MM)", value=datetime.today().strftime("%Y-%m"), key="series_period")
+pat_input = st.sidebar.number_input("Patrimônio (R$)", value=0.0, format="%.2f", key="series_patrimonio")
+cdi_input = st.sidebar.number_input("CDI var. mensal (%)", value=0.0, format="%.4f", key="series_cdi")
+ipca_input = st.sidebar.number_input("IPCA var. mensal (%)", value=0.0, format="%.4f", key="series_ipca")
+ibov_input = st.sidebar.number_input("IBOV var. mensal (%)", value=0.0, format="%.4f", key="series_ibov")
+usd_input = st.sidebar.number_input("Dólar var. mensal (%)", value=0.0, format="%.4f", key="series_usd")
+carteira_input = st.sidebar.number_input("Carteira var. mensal (%)", value=0.0, format="%.4f", key="series_carteira")
+if st.sidebar.button("Salvar série mensal", key="save_series"):
+    upsert_entry(owner_sel, period_input, patrimonio=pat_input, cdi=cdi_input, ipca=ipca_input, ibov=ibov_input, usd=usd_input, carteira=carteira_input)
+    st.sidebar.success("Registro salvo.")
+    st.experimental_rerun()
+
+st.sidebar.markdown("Upload CSV (owner,period,patrimonio,cdi,ipca,ibov,usd,carteira)")
+csv_file = st.sidebar.file_uploader("Importar séries (CSV)", type=["csv"], key="csv_series")
+if csv_file:
+    try:
+        df_csv = pd.read_csv(csv_file)
+        for _, r in df_csv.iterrows():
+            upsert_entry(r['owner'], str(r['period']), patrimonio=r.get('patrimonio'), cdi=r.get('cdi'),
+                         ipca=r.get('ipca'), ibov=r.get('ibov'), usd=r.get('usd'), carteira=r.get('carteira'))
+        st.sidebar.success("CSV importado.")
+        st.experimental_rerun()
+    except Exception as e:
+        st.sidebar.error(f"Falha ao importar CSV: {e}")
+
 # ---------------- Page navigation ----------------
 page = st.sidebar.radio("Navegação", ["Visão Geral", "IPS", "Controle de Investimentos"], index=0)
 
@@ -207,7 +241,7 @@ def render_visao_geral():
             "INDJ26": indj26
         }).melt(id_vars=["date"], var_name="serie", value_name="valor")
 
-    # Plot 1: evolução do patrimônio
+    # Plot 1: evolução do patrimônio (global)
     st.caption("1) Evolução do Patrimônio vs CDI / Renda Fixa / IBOV")
     fig1 = px.line(df_plot, x="date", y="valor", color="serie",
                    labels={"date":"Data","valor":"Valor (R$)","serie":"Série"})
@@ -215,7 +249,83 @@ def render_visao_geral():
     st.plotly_chart(fig1, use_container_width=True)
     st.markdown("---")
 
-    # Fluxo de caixa
+    # --- New: load monthly series for Paula and Adolfo and plot them ---
+    df_paula = list_entries("Paula Casale")
+    df_adolfo = list_entries("Adolfo Pacheco")
+    df_total = aggregate_total()
+
+    def _prepare(df):
+        if df is None or df.empty:
+            return pd.DataFrame()
+        df = df.copy()
+        df['period'] = pd.to_datetime(df['period'])
+        df['patrimonio'] = pd.to_numeric(df.get('patrimonio', 0), errors='coerce').fillna(0.0)
+        # ensure numeric for indices
+        for col in ['cdi','ipca','ibov','usd','carteira']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            else:
+                df[col] = np.nan
+        return df.sort_values('period')
+
+    df_paula = _prepare(df_paula)
+    df_adolfo = _prepare(df_adolfo)
+    df_total = _prepare(df_total)
+
+    # Plot: individual patrimonies + total
+    st.caption("Evolução Patrimonial por Investidor")
+    fig_personal = go.Figure()
+    if not df_paula.empty:
+        fig_personal.add_trace(go.Scatter(x=df_paula['period'], y=df_paula['patrimonio'],
+                                          mode='lines+markers', name='Paula Casale',
+                                          hovertemplate='%{x|%Y-%m}: %{y:$,.2f}<extra></extra>'))
+    if not df_adolfo.empty:
+        fig_personal.add_trace(go.Scatter(x=df_adolfo['period'], y=df_adolfo['patrimonio'],
+                                          mode='lines+markers', name='Adolfo Pacheco',
+                                          hovertemplate='%{x|%Y-%m}: %{y:$,.2f}<extra></extra>'))
+    if not df_total.empty:
+        fig_personal.add_trace(go.Scatter(x=df_total['period'], y=df_total['patrimonio'],
+                                          mode='lines+markers', name='Total (soma)',
+                                          line=dict(width=2, dash='dash'),
+                                          hovertemplate='%{x|%Y-%m}: %{y:$,.2f}<extra></extra>'))
+    if fig_personal.data:
+        fig_personal.update_layout(xaxis_title="Período", yaxis_title="Patrimônio (R$)", height=420)
+        st.plotly_chart(fig_personal, use_container_width=True)
+    else:
+        st.info("Nenhum dado mensal de patrimônio encontrado para Paula ou Adolfo.")
+
+    st.markdown("---")
+
+    # Plot: indices (CDI, IPCA, IBOV, USD, Carteira) — compare Paula / Adolfo / Média (Total)
+    st.caption("Variações mensais: CDI / IPCA / IBOV / USD / Carteira")
+    fig_indices = go.Figure()
+    # helper to add traces safely
+    def add_index_traces(df, owner_label, dash=None):
+        if df.empty:
+            return
+        for col, label in [('cdi','CDI'), ('ipca','IPCA'), ('ibov','IBOV'), ('usd','USD'), ('carteira','Carteira')]:
+            if col in df.columns and df[col].notna().any():
+                fig_indices.add_trace(go.Scatter(
+                    x=df['period'], y=df[col],
+                    mode='lines+markers',
+                    name=f"{label} - {owner_label}",
+                    line=dict(dash=dash) if dash else None,
+                    hovertemplate='%{x|%Y-%m}: %{y:.4f}<extra></extra>'
+                ))
+
+    add_index_traces(df_paula, "Paula Casale", dash=None)
+    add_index_traces(df_adolfo, "Adolfo Pacheco", dash='dash')
+    add_index_traces(df_total, "Média (Total)", dash='dot')
+
+    if fig_indices.data:
+        fig_indices.update_layout(xaxis_title="Período", yaxis_title="Variação (pct ou dec)", height=420)
+        st.plotly_chart(fig_indices, use_container_width=True)
+    else:
+        st.info("Nenhum dado de variações mensais (CDI/IPCA/IBOV/USD/Carteira) encontrado.")
+
+    st.markdown("---")
+
+    # Fluxo de caixa (existing)
     st.caption("2) Fluxo de Caixa Diário")
     if not df_transactions.empty:
         df_tx = df_transactions.copy()
@@ -243,9 +353,10 @@ def render_visao_geral():
                               text=[format_brl(v) for v in saidas], textposition="auto"))
         fig2.update_layout(barmode='group', xaxis_title="Data", yaxis_title="Valor (R$)", height=420)
         st.plotly_chart(fig2, use_container_width=True)
+
     st.markdown("---")
 
-    # Despesas por categoria
+    # Despesas por categoria (existing)
     st.caption("3) Principais despesas por categoria")
     if not df_transactions.empty and "category" in df_transactions.columns:
         df_tx = df_transactions.copy()
@@ -272,6 +383,7 @@ def render_visao_geral():
                            hovertemplate="%{label}<br>%{customdata[0]}<extra></extra>")
         fig3.update_layout(height=420)
         st.plotly_chart(fig3, use_container_width=True)
+
     st.markdown("---")
 
     # Pequena tabela resumo (robust)
@@ -415,6 +527,7 @@ def render_visao_geral():
 
 # ---------------- IPS page ----------------
 # IPS rendering moved to ips.render_ips
+
 # ---------------- Controle de Investimentos page ----------------
 # Controle rendering moved to investment.render_controle
 
