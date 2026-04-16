@@ -17,6 +17,7 @@ from data_series import upsert_entry, list_entries, aggregate_total, ensure_tabl
 ensure_series_table()
 
 # Import UI renderers and data functions from modules
+from cashflow import render_cash_ui
 from ips import render_ips
 from investment import (
     render_controle_ui,
