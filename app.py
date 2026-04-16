@@ -575,17 +575,3 @@ def render_visao_geral():
 
     st.markdown("---")
     st.info("Formulários e controles de edição estão no sidebar. Para produção, adicione autenticação, validação e backups.")
-
-# ---------------- IPS page ----------------
-# IPS rendering moved to ips.render_ips
-
-# ---------------- Controle de Investimentos page ----------------
-# Controle rendering moved to investment.render_controle
-
-# ---------------- Render selected page ----------------
-if page == "Visão Geral":
-    render_visao_geral()
-elif page == "IPS":
-    render_ips()
-elif page == "Controle de Investimentos":
-    render_controle()
