@@ -3,6 +3,8 @@ import streamlit as st
 import pandas as pd
 from sqlalchemy import text
 from db import engine
+import time
+import uuid
 
 # ---------------- Read helpers ----------------
 def read_table_safe(name: str) -> pd.DataFrame:
