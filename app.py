@@ -44,44 +44,6 @@ st.title("StreamDash — Finanças Pessoais")
 # ---------------- Top navigation as tabs ----------------
 tab_visao, tab_cash, tab_controle, tab_ips = st.tabs(["Início", "Fluxo de Caixa", "Controle de Investimentos", "IPS"])
 
-# ---------------- Shared sidebar: upload + series (kept minimal) ----------------
-st.sidebar.title("Ferramentas")
-st.sidebar.header("Upload e processamento")
-uploaded = st.sidebar.file_uploader("Envie CSV ou XLSX (um por vez)", type=["csv","xlsx"])
-mapping_df = load_mapping("mappings.csv")
-
-if uploaded:
-    file_name = uploaded.name
-    import_batch_id = f"{int(time.time())}_{uuid.uuid4().hex[:6]}"
-    try:
-        if file_name.lower().endswith(".csv"):
-            df_raw = pd.read_csv(uploaded)
-        else:
-            df_raw = pd.read_excel(uploaded)
-    except Exception as e:
-        st.sidebar.error(f"Falha ao ler arquivo: {e}")
-        df_raw = None
-
-    if df_raw is not None:
-        st.sidebar.info(f"Lido {len(df_raw)} linhas")
-        st.sidebar.write("Preview:")
-        st.sidebar.dataframe(df_raw.head())
-
-        stg_table = f"stg_{file_name.split('.')[0].lower()}"
-        rows_staged = write_staging(df_raw, stg_table, import_batch_id, file_name)
-
-        norm = apply_mapping(df_raw, mapping_df, file_name)
-        missing = validate_required(norm, mapping_df, file_name)
-        if missing:
-            msg = f"Missing required columns: {missing}"
-            st.sidebar.error(msg)
-            record_upload_error(import_batch_id, file_name, "MISSING_REQUIRED", msg)
-            record_upload_result(import_batch_id, file_name, rows_staged, 0, "failed")
-        else:
-            rows_promoted = promote_merge_sqlite(norm, import_batch_id, file_name)
-            record_upload_result(import_batch_id, file_name, rows_staged, rows_promoted, "processed")
-            st.sidebar.success(f"Arquivo processado. Linhas promovidas: {rows_promoted}")
-
 # Sidebar: monthly series quick form and CSV import (kept in sidebar)
 st.sidebar.markdown("---")
 st.sidebar.subheader("Séries mensais (Paula / Adolfo)")
