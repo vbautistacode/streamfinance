@@ -9,6 +9,7 @@ import uuid
 
 # utilitários compartilhados: garantir format_brl e safe_rerun
 from utils import safe_rerun, format_brl as format_brl
+_format_brl = format_brl
 # manter alias antigo para compatibilidade com código existente
 _format_brl = format_brl
 
