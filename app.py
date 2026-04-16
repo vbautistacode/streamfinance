@@ -170,13 +170,38 @@ def render_performance_infographic(owner_a="Paula Casale", owner_b="Adolfo Pache
         merged['pat_soma'] = merged['pat1'] + merged['pat2']
         return merged.set_index('period')[['pat_soma']].sort_index()
 
-    df_soma = build_sum_pat(df_a, df_b)
-    if not df_soma.empty:
-        df_soma = df_soma.reindex(pd.to_datetime(last_periods)).fillna(method='ffill').fillna(0.0)
-        carteira_soma_ret = df_soma['pat_soma'].pct_change().fillna(0.0).rename('Carteira (soma) (%)')
-        carteira_soma_df = carteira_soma_ret.to_frame()
-    else:
-        carteira_soma_df = pd.DataFrame()
+        # --- robust reindex for df_soma using last_periods ---
+    try:
+        # ensure df_soma is a DataFrame and has a datetime index
+        if isinstance(df_soma, pd.DataFrame) and not df_soma.empty:
+            # if index is not datetime, try to convert
+            if not pd.api.types.is_datetime64_any_dtype(df_soma.index):
+                if 'period' in df_soma.columns:
+                    df_soma['period'] = pd.to_datetime(df_soma['period'], errors='coerce')
+                    df_soma = df_soma.set_index('period')
+                else:
+                    # try to coerce index values
+                    try:
+                        df_soma.index = pd.to_datetime(df_soma.index, errors='coerce')
+                    except Exception:
+                        pass
+
+            # normalize last_periods to DatetimeIndex
+            lp = pd.to_datetime(last_periods, errors='coerce')
+            lp = lp[~pd.isna(lp)]
+            if len(lp) == 0:
+                # nothing to reindex to; keep df_soma as-is
+                df_soma = df_soma.copy()
+            else:
+                target_index = pd.DatetimeIndex(lp)
+                # reindex, forward-fill then fill remaining with zeros
+                df_soma = df_soma.reindex(target_index).sort_index().fillna(method='ffill').fillna(0.0)
+        else:
+            # ensure df_soma is an empty DataFrame with datetime index if missing
+            df_soma = pd.DataFrame(index=pd.DatetimeIndex(pd.to_datetime([])))
+    except Exception:
+        # fallback: make df_soma empty DataFrame to avoid breaking the flow
+        df_soma = pd.DataFrame(index=pd.DatetimeIndex(pd.to_datetime([])))
 
     def monthly_returns_from_pat(df, label):
         if df.empty:
