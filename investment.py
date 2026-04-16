@@ -6,6 +6,23 @@ from db import engine
 import time
 import uuid
 
+# ---------------- Utility: safe rerun ----------------
+def safe_rerun():
+    """
+    Tenta reiniciar o script com st.experimental_rerun().
+    Se não estiver disponível ou falhar, mostra instrução para o usuário.
+    """
+    try:
+        if hasattr(st, "experimental_rerun"):
+            st.experimental_rerun()
+            return
+    except Exception:
+        # se st.experimental_rerun existir mas lançar erro, capturamos e seguimos para fallback
+        pass
+
+    # fallback: instruir o usuário a atualizar manualmente
+    st.info("Alteração salva. Atualize a página manualmente para ver as mudanças.")
+
 # ---------------- Read helpers ----------------
 def read_table_safe(name: str) -> pd.DataFrame:
     try:
@@ -98,9 +115,13 @@ def render_controle_ui():
             submitted_asset = st.form_submit_button("Adicionar ativo")
             if submitted_asset:
                 import_batch_id = f"manual_asset_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-                add_asset(a_categoria, a_descricao, a_valor, source="manual_form", import_batch_id=import_batch_id)
-                st.success("Ativo adicionado com sucesso.")
-                st.experimental_rerun()
+                try:
+                    add_asset(a_categoria, a_descricao, a_valor, source="manual_form", import_batch_id=import_batch_id)
+                    st.success("Ativo adicionado com sucesso.")
+                except Exception as e:
+                    st.error(f"Falha ao adicionar ativo: {e}")
+                # use safe rerun
+                safe_rerun()
 
         st.markdown("---")
         st.subheader("Adicionar passivo / dívida")
@@ -111,9 +132,12 @@ def render_controle_ui():
             submitted_liab = st.form_submit_button("Adicionar passivo")
             if submitted_liab:
                 import_batch_id = f"manual_liab_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-                add_liability(l_categoria, l_descricao, l_valor, source="manual_form", import_batch_id=import_batch_id)
-                st.success("Passivo adicionado com sucesso.")
-                st.experimental_rerun()
+                try:
+                    add_liability(l_categoria, l_descricao, l_valor, source="manual_form", import_batch_id=import_batch_id)
+                    st.success("Passivo adicionado com sucesso.")
+                except Exception as e:
+                    st.error(f"Falha ao adicionar passivo: {e}")
+                safe_rerun()
 
     # Right column: lists, edit/remove controls
     with col_right:
@@ -139,13 +163,19 @@ def render_controle_ui():
                     b_up = st.form_submit_button("Atualizar ativo")
                     b_del = st.form_submit_button("Remover ativo")
                     if b_up:
-                        update_asset(aid, ca, cd, cv)
-                        st.success("Ativo atualizado.")
-                        st.experimental_rerun()
+                        try:
+                            update_asset(aid, ca, cd, cv)
+                            st.success("Ativo atualizado.")
+                        except Exception as e:
+                            st.error(f"Falha ao atualizar ativo: {e}")
+                        safe_rerun()
                     if b_del:
-                        delete_asset(aid)
-                        st.success("Ativo removido.")
-                        st.experimental_rerun()
+                        try:
+                            delete_asset(aid)
+                            st.success("Ativo removido.")
+                        except Exception as e:
+                            st.error(f"Falha ao remover ativo: {e}")
+                        safe_rerun()
         else:
             st.info("Nenhum ativo manual registrado.")
 
@@ -172,13 +202,19 @@ def render_controle_ui():
                     b_up_l = st.form_submit_button("Atualizar passivo")
                     b_del_l = st.form_submit_button("Remover passivo")
                     if b_up_l:
-                        update_liability(lid, la, ld, lv)
-                        st.success("Passivo atualizado.")
-                        st.experimental_rerun()
+                        try:
+                            update_liability(lid, la, ld, lv)
+                            st.success("Passivo atualizado.")
+                        except Exception as e:
+                            st.error(f"Falha ao atualizar passivo: {e}")
+                        safe_rerun()
                     if b_del_l:
-                        delete_liability(lid)
-                        st.success("Passivo removido.")
-                        st.experimental_rerun()
+                        try:
+                            delete_liability(lid)
+                            st.success("Passivo removido.")
+                        except Exception as e:
+                            st.error(f"Falha ao remover passivo: {e}")
+                        safe_rerun()
         else:
             st.info("Nenhum passivo manual registrado.")
 
