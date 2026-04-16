@@ -111,7 +111,17 @@ def render_performance_infographic(owner_a="Paula Casale", owner_b="Adolfo Pache
         st.info("Nenhuma série mensal encontrada para gerar o infográfico.")
         return
 
-    last_periods = pd.to_datetime(ref['period'].dropna().unique()).sort_values()[-months:]
+    # --- robust selection of last_periods ---
+    periods_series = pd.to_datetime(ref['period'].dropna(), errors='coerce')
+    periods_series = periods_series[periods_series.notna()]
+    if periods_series.empty:
+        st.info("Nenhuma data válida encontrada nas séries.")
+        return
+    # remove duplicates, sort and take last `months`
+    unique_sorted = pd.Series(periods_series.unique()).dropna().astype('datetime64[ns]')
+    unique_sorted = unique_sorted.sort_values()
+    # if there are fewer periods than requested, take all available
+    last_periods = unique_sorted.iloc[-months:].tolist()
 
     def monthly_returns_from_pat(df, label):
         if df.empty:
@@ -145,6 +155,7 @@ def render_performance_infographic(owner_a="Paula Casale", owner_b="Adolfo Pache
 
     parts = [paula_ret, adolfo_ret, carteira_idx, cdi, ibov, ipca, usd]
     df_monthly = pd.concat(parts, axis=1)
+    # ensure index covers last_periods in correct order
     df_monthly = df_monthly.reindex(pd.to_datetime(last_periods)).fillna(np.nan)
     df_monthly.index.name = 'period'
     df_monthly_display = df_monthly.copy()
@@ -168,8 +179,8 @@ def render_performance_infographic(owner_a="Paula Casale", owner_b="Adolfo Pache
 
     fig = px.line(df_acc_plot, x='period', y='acc_ret', color='serie', markers=True,
                   labels={'period':'Período','acc_ret':'Rentabilidade acumulada'}, color_discrete_map=color_map)
-    ymin = min(df_acc_plot['acc_ret'].min()*1.1, -0.2)
-    ymax = max(df_acc_plot['acc_ret'].max()*1.1, 0.6)
+    ymin = min(df_acc_plot['acc_ret'].min()*1.1 if not df_acc_plot['acc_ret'].isna().all() else 0, -0.2)
+    ymax = max(df_acc_plot['acc_ret'].max()*1.1 if not df_acc_plot['acc_ret'].isna().all() else 0, 0.6)
     fig.update_yaxes(tickformat=".0%", range=[ymin, ymax])
     fig.update_layout(title="Gráfico de rentabilidade acumulada dos últimos 12 meses",
                       legend_title_text="Séries", height=420, margin=dict(t=40,b=40,l=40,r=40))
