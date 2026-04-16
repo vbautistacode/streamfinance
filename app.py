@@ -41,7 +41,7 @@ st.set_page_config(page_title="StreamDash — Finanças Pessoais", layout="wide"
 st.title("StreamDash — Finanças Pessoais")
 
 # ---------------- Top navigation as tabs ----------------
-tab_visao, tab_controle, tab_ips = st.tabs(["Início", "Controle de Investimentos","IPS",])
+tab_visao, tab_cash, tab_controle, tab_ips = st.tabs(["Início", "Fluxo de Caixa", "Controle de Investimentos", "IPS"])
 
 # ---------------- Shared sidebar: upload + series (kept minimal) ----------------
 st.sidebar.title("Ferramentas")
@@ -239,13 +239,17 @@ with tab_visao:
     # (rest of Visão Geral continues: fluxo, despesas, composição, KPIs)
     # For brevity the rest of the existing Visão Geral content is kept as before.
 
-# ---------------- IPS tab ----------------
-with tab_ips:
-    render_ips()
+#----------------- Fluxo de Caixa tab ----------------
+with tab_cash:
+    render_cash_ui()  # This function should be defined in a separate module (e.g., cash.py) and imported at the top
 
 # ---------------- Controle de Investimentos tab ----------------
 with tab_controle:
     render_controle_ui()
+
+# ---------------- IPS tab ----------------
+with tab_ips:
+    render_ips()
 
 # ---------------- Visão Geral page ----------------
 def render_visao_geral():
