@@ -45,7 +45,7 @@ st.title("StreamDash — Finanças Pessoais")
 tab_visao, tab_cash, tab_controle, tab_ips = st.tabs(["Início", "Fluxo de Caixa", "Controle de Investimentos", "IPS"])
 
 # Sidebar: monthly series quick form and CSV import (kept in sidebar)
-st.sidebar.markdown("---")
+
 st.sidebar.subheader("Séries mensais (Paula / Adolfo)")
 owner_sel = st.sidebar.selectbox("Investidor", ["Paula Casale", "Adolfo Pacheco"], key="series_owner")
 period_input = st.sidebar.text_input("Período (YYYY-MM)", value=datetime.today().strftime("%Y-%m"), key="series_period")
@@ -59,19 +59,6 @@ if st.sidebar.button("Salvar série mensal", key="save_series"):
     upsert_entry(owner_sel, period_input, patrimonio=pat_input, cdi=cdi_input, ipca=ipca_input, ibov=ibov_input, usd=usd_input, carteira=carteira_input)
     st.sidebar.success("Registro salvo.")
     st.experimental_rerun()
-
-st.sidebar.markdown("Upload CSV (owner,period,patrimonio,cdi,ipca,ibov,usd,carteira)")
-csv_file = st.sidebar.file_uploader("Importar séries (CSV)", type=["csv"], key="csv_series")
-if csv_file:
-    try:
-        df_csv = pd.read_csv(csv_file)
-        for _, r in df_csv.iterrows():
-            upsert_entry(r['owner'], str(r['period']), patrimonio=r.get('patrimonio'), cdi=r.get('cdi'),
-                         ipca=r.get('ipca'), ibov=r.get('ibov'), usd=r.get('usd'), carteira=r.get('carteira'))
-        st.sidebar.success("CSV importado.")
-        st.experimental_rerun()
-    except Exception as e:
-        st.sidebar.error(f"Falha ao importar CSV: {e}")
 
 # ---------------- Visão Geral tab ----------------
 with tab_visao:
