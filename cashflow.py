@@ -7,7 +7,6 @@ from db import engine
 import plotly.graph_objects as go
 import plotly.express as px
 from utils import format_brl
-
 from sqlalchemy import text
 
 # Helper: tenta converter string de moeda "R$ 1.234,56" ou "1.234,56" para float
@@ -19,7 +18,6 @@ def parse_currency(x):
     s = str(x).strip()
     s = s.replace("R$", "").replace("r$", "").replace(" ", "")
     # remover pontos de milhar e normalizar vírgula decimal
-    # cuidado: primeiro remover pontos que são separadores de milhar
     s = s.replace(".", "").replace(",", ".")
     try:
         return float(s)
@@ -39,8 +37,20 @@ def read_transactions_from_db():
         with engine.connect() as conn:
             df = pd.read_sql("SELECT * FROM transactions", conn)
             # normalizar colunas esperadas
-            if "date" in df.columns and "amount" in df.columns:
-                df = df.rename(columns={"date": "data", "amount": "valor (R$)", "description": "lancamento"})
+            cols = [c.lower() for c in df.columns]
+            # mapear colunas comuns para nomes internos
+            rename_map = {}
+            if "date" in cols:
+                # encontrar coluna original com nome date (case-insensitive)
+                orig = [c for c in df.columns if c.lower() == "date"][0]
+                rename_map[orig] = "data"
+            if "amount" in cols:
+                orig = [c for c in df.columns if c.lower() == "amount"][0]
+                rename_map[orig] = "valor (R$)"
+            if "description" in cols:
+                orig = [c for c in df.columns if c.lower() == "description"][0]
+                rename_map[orig] = "lancamento"
+            df = df.rename(columns=rename_map)
             return df
     except Exception:
         return pd.DataFrame()
@@ -71,17 +81,6 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     # converter valores
     if "valor (R$)" in df.columns:
         df["valor (R$)"] = df["valor (R$)"].apply(parse_currency)
-    else:
-        # tentar detectar coluna de valores
-        for c in df.columns:
-            try:
-                sample = df[c].dropna().astype(str).head(10).tolist()
-                if any(any(ch.isdigit() for ch in s) for s in sample):
-                    # não renomeia automaticamente aqui; será tratado depois
-                    pass
-            except Exception:
-                pass
-
     if "saldos (R$)" in df.columns:
         df["saldos (R$)"] = df["saldos (R$)"].apply(parse_currency)
 
@@ -96,11 +95,10 @@ def save_cashflow_to_db(df: pd.DataFrame, table_name: str = "transactions") -> i
     if df.empty:
         return 0
 
-    # preparar dataframe mínimo
     df2 = df.copy()
-    # garantir colunas
     if "data" not in df2.columns or "valor (R$)" not in df2.columns:
         return 0
+
     df2 = df2.rename(columns={"lancamento": "description", "valor (R$)": "amount"})
     df2["date"] = pd.to_datetime(df2["data"], errors="coerce")
     df2["description"] = df2.get("description", "").astype(str)
@@ -114,7 +112,6 @@ def save_cashflow_to_db(df: pd.DataFrame, table_name: str = "transactions") -> i
     with engine.begin() as conn:
         for _, r in df2.iterrows():
             try:
-                # evitar inserir duplicata já existente: checar existência
                 exists = conn.execute(text("""
                     SELECT 1 FROM transactions WHERE date = :date AND amount = :amount AND description = :desc LIMIT 1
                 """), {"date": r["date"], "amount": float(r["amount"]), "desc": r["description"]}).fetchone()
@@ -126,7 +123,6 @@ def save_cashflow_to_db(df: pd.DataFrame, table_name: str = "transactions") -> i
                 """), {"date": r["date"], "description": r["description"], "amount": float(r["amount"])})
                 inserted += 1
             except Exception:
-                # ignorar erros de linha individual para não abortar todo o batch
                 continue
     return inserted
 
@@ -145,7 +141,6 @@ def render_cash_ui():
     if uploaded is not None:
         try:
             if str(uploaded.name).lower().endswith(".csv"):
-                # tentar detectar separador automaticamente
                 try:
                     df = pd.read_csv(uploaded, sep=None, engine="python")
                 except Exception:
@@ -170,7 +165,6 @@ def render_cash_ui():
 
     # Verificar coluna de valor
     if "valor (R$)" not in df.columns:
-        # tentar inferir coluna de valores
         numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) or df[c].astype(str).str.contains(r"[\d\.,\-]").any()]
         if numeric_cols:
             sums = {c: df[c].apply(lambda v: parse_currency(v) if not pd.isna(v) else 0).abs().sum() for c in numeric_cols}
@@ -279,11 +273,11 @@ def render_cash_ui():
         margin=dict(t=40, b=40, l=40, r=40)
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
     st.markdown("---")
 
-        # Mostrar tabela com preview e totais
+    # Mostrar tabela com preview e totais
     st.subheader("Detalhe de lançamentos (período filtrado)")
     df_display = df_filtered.copy()
     df_display["data"] = df_display["data"].dt.strftime("%Y-%m-%d")
@@ -305,10 +299,8 @@ def render_cash_ui():
     if "saldos (R$)" in df_display.columns:
         cols_show.append("saldos (R$)")
 
-    # garantir que todas as colunas existem antes de exibir
     cols_show = [c for c in cols_show if c in df_display.columns]
-
-    st.dataframe(df_display[cols_show], use_container_width=True)
+    st.dataframe(df_display[cols_show], width='stretch')
 
     st.markdown("---")
 
@@ -324,5 +316,70 @@ def render_cash_ui():
                 st.info("Nenhum lançamento novo foi salvo (possíveis duplicatas ou nenhum registro válido).")
         except Exception as e:
             st.error(f"Erro ao salvar no banco: {e}")
+
+    st.markdown("---")
+
+    # Despesas por categoria
+    st.caption("Principais despesas por categoria")
+    # preferir coluna 'category' se existir no dataset; tentar inferir por 'lançamento' caso contrário
+    df_for_cat = df_filtered if not df_filtered.empty else df
+    if "category" in df_for_cat.columns:
+        df_cat_src = df_for_cat.copy()
+        df_cat_src["amount"] = pd.to_numeric(df_cat_src.get("valor (R$)"), errors="coerce").fillna(0.0)
+        df_cat_src["expense"] = df_cat_src["amount"].apply(lambda x: -x if x < 0 else 0.0)
+        df_cat = df_cat_src.groupby("category", as_index=False)["expense"].sum()
+        df_cat = df_cat[df_cat["expense"] > 0].sort_values("expense", ascending=False).head(10)
+    else:
+        # tentar agrupar por texto do lançamento (primeira palavra ou tag)
+        if "lancamento" in df_for_cat.columns:
+            df_cat_src = df_for_cat.copy()
+            df_cat_src["amount"] = pd.to_numeric(df_cat_src.get("valor (R$)"), errors="coerce").fillna(0.0)
+            df_cat_src["expense"] = df_cat_src["amount"].apply(lambda x: -x if x < 0 else 0.0)
+            # extrair categoria simples a partir do texto do lançamento (primeira palavra)
+            df_cat_src["categoria_inferida"] = df_cat_src["lancamento"].astype(str).str.split().str[0].fillna("Outros")
+            df_cat = df_cat_src.groupby("categoria_inferida", as_index=False)["expense"].sum()
+            df_cat = df_cat[df_cat["expense"] > 0].sort_values("expense", ascending=False).head(10)
+            df_cat = df_cat.rename(columns={"categoria_inferida": "category"})
+        else:
+            df_cat = pd.DataFrame()
+
+    if not df_cat.empty:
+        df_cat["expense_fmt"] = df_cat["expense"].apply(format_brl)
+        fig3 = px.pie(df_cat, names=df_cat.columns[0], values="expense", hole=0.35)
+        fig3.update_traces(textposition='inside', textinfo='percent+label',
+                           customdata=df_cat[["expense_fmt"]].values,
+                           hovertemplate="%{label}<br>%{customdata[0]}<extra></extra>")
+        fig3.update_layout(height=420)
+        st.plotly_chart(fig3, width='stretch')
+    else:
+        st.info("Nenhuma despesa categorizada encontrada para o período selecionado.")
+
+    st.markdown("---")
+
+    # Pequena tabela resumo (robust)
+    st.markdown("### Resumo")
+    saldo_total = current_balance
+    fluxo_30 = 0.0
+    despesas_30 = 0.0
+
+    if not df_daily.empty:
+        try:
+            fluxo_30 = (df_daily['entradas'] - df_daily['saidas']).tail(30).sum()
+        except Exception:
+            fluxo_30 = 0.0
+
+    if not df_cat.empty:
+        try:
+            despesas_30 = float(df_cat['expense'].sum())
+        except Exception:
+            despesas_30 = 0.0
+
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.metric("Saldo Total", format_brl(saldo_total))
+    with col_b:
+        st.metric("Fluxo Líquido (últimos 30d)", format_brl(fluxo_30))
+    with col_c:
+        st.metric("Despesas (últimos 30d)", format_brl(despesas_30))
 
     st.markdown("---")

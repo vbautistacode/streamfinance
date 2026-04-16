@@ -193,89 +193,103 @@ def render_performance_infographic(owner_a="Paula Casale", owner_b="Adolfo Pache
 with tab_visao:
     st.subheader("Visão Geral")
 
-    # Tentar ler transactions e snapshots do DB
-    try:
-        with engine.connect() as conn:
-            df_transactions = pd.read_sql("SELECT * FROM transactions", conn)
-    except Exception:
-        df_transactions = pd.DataFrame()
+    # Evolução do patrimônio (global) — usar soma dos owners quando disponível
+if True:
+    # tentar carregar snapshots e séries agregadas
     try:
         with engine.connect() as conn:
             df_snapshots = pd.read_sql("SELECT * FROM net_worth_snapshots", conn)
     except Exception:
         df_snapshots = pd.DataFrame()
 
-    # Evolução do patrimônio (global)
-    if not df_snapshots.empty:
-        df_evol_real = df_snapshots.sort_values("snapshot_date").rename(columns={"snapshot_date":"date","net_worth":"Patrimônio"})
-        df_evol_plot = df_evol_real[["date","Patrimônio"]].copy()
-        base = float(df_evol_plot["Patrimônio"].iloc[0])
-        n = len(df_evol_plot)
-        cdi = base * (1 + np.cumsum(np.repeat(0.0003, n)))
-        renda_fixa = base * (1 + np.cumsum(np.repeat(0.0005, n)))
-        indj26 = base * (1 + np.cumsum(np.random.normal(0.0002, 0.001, n)))
-        df_evol_plot["CDI"] = cdi
-        df_evol_plot["Renda Fixa"] = renda_fixa
-        df_evol_plot["INDJ26"] = indj26
-        df_plot = df_evol_plot.melt(id_vars=["date"], var_name="serie", value_name="valor")
-    else:
-        np.random.seed(42)
-        today = datetime.today().date()
-        dates = pd.date_range(end=today, periods=180).to_pydatetime().tolist()
-        patrimonio = np.cumsum(np.random.normal(loc=50, scale=200, size=len(dates))) + 100000
-        cdi = 100000 * (1 + np.cumsum(np.repeat(0.0003, len(dates))))
-        renda_fixa = 100000 * (1 + np.cumsum(np.repeat(0.0005, len(dates))))
-        indj26 = 100000 * (1 + np.cumsum(np.random.normal(0.0002, 0.001, len(dates))))
-        df_plot = pd.DataFrame({
-            "date": dates,
-            "Patrimônio": patrimonio,
-            "CDI": cdi,
-            "Renda Fixa": renda_fixa,
-            "INDJ26": indj26
-        }).melt(id_vars=["date"], var_name="serie", value_name="valor")
+    # carregar séries agregadas (soma de patrimônios por período)
+    try:
+        df_total_series = aggregate_total()  # já retorna period, patrimonio, cdi, ipca, ibov, usd, carteira
+    except Exception:
+        df_total_series = pd.DataFrame()
 
-    st.caption("1) Evolução do Patrimônio vs CDI / Renda Fixa / IBOV")
-    fig1 = px.line(df_plot, x="date", y="valor", color="serie",
-                   labels={"date":"Data","valor":"Valor (R$)","serie":"Série"})
-    fig1.update_layout(height=420, legend_title_text="Séries", margin=dict(t=40, b=40, l=40, r=40))
+    # preparar df_plot com prioridade: snapshots (diário) se existirem, senão séries mensais expandidas
+    if not df_snapshots.empty:
+        # usar snapshots para série diária real
+        df_evol_real = df_snapshots.sort_values("snapshot_date").rename(columns={"snapshot_date": "date", "net_worth": "Patrimônio"})
+        df_evol_plot = df_evol_real[["date", "Patrimônio"]].copy()
+
+        # se tivermos séries agregadas, adicionar CDI e Renda Fixa a partir de df_total_series (interpolando mensal -> diário)
+        if not df_total_series.empty and "period" in df_total_series.columns:
+            # transformar period (primeiro dia do mês) em índice e reindexar para datas diárias
+            df_idx = df_total_series.copy()
+            df_idx['period'] = pd.to_datetime(df_idx['period'])
+            df_idx = df_idx.set_index('period').sort_index()
+            # criar índice diário cobrindo o intervalo dos snapshots
+            date_index = pd.date_range(start=df_evol_plot['date'].min(), end=df_evol_plot['date'].max(), freq='D')
+            df_daily_idx = df_idx.reindex(df_idx.index.union(date_index)).sort_index()
+            # forward-fill/linear interpolate índices numéricos
+            for col in ['cdi', 'ipca', 'ibov', 'usd', 'carteira']:
+                if col in df_daily_idx.columns:
+                    df_daily_idx[col] = pd.to_numeric(df_daily_idx[col], errors='coerce').interpolate(method='time').ffill().bfill()
+            # extrair apenas o índice diário alinhado ao date_index
+            df_indices_daily = df_daily_idx.reindex(date_index).reset_index().rename(columns={'index':'date'})
+            # anexar CDI e Carteira (mocks) ao df_evol_plot por join em date
+            df_evol_plot = df_evol_plot.merge(df_indices_daily[['date','cdi','carteira']], on='date', how='left')
+        else:
+            # sem séries agregadas, criar mocks simples para comparação
+            base = float(df_evol_plot["Patrimônio"].iloc[0])
+            n = len(df_evol_plot)
+            df_evol_plot["cdi"] = base * (1 + np.cumsum(np.repeat(0.0003, n)))
+            df_evol_plot["carteira"] = df_evol_plot["Patrimônio"]
+    else:
+        # sem snapshots: tentar usar df_total_series (mensal) e expandir para diário
+        if not df_total_series.empty and "period" in df_total_series.columns:
+            df_ts = df_total_series.copy()
+            df_ts['period'] = pd.to_datetime(df_ts['period'])
+            # usar patrimonio agregado como série principal
+            df_ts = df_ts[['period','patrimonio','cdi','carteira']].rename(columns={'period':'date','patrimonio':'Patrimônio'})
+            # expandir para diário por forward-fill
+            df_ts = df_ts.set_index('date').sort_index()
+            date_index = pd.date_range(start=df_ts.index.min(), end=df_ts.index.max(), freq='D')
+            df_daily = df_ts.reindex(df_ts.index.union(date_index)).sort_index()
+            df_daily[['Patrimônio','cdi','carteira']] = df_daily[['Patrimônio','cdi','carteira']].interpolate(method='time').ffill().bfill()
+            df_evol_plot = df_daily.reindex(date_index).reset_index().rename(columns={'index':'date'})
+        else:
+            # fallback: gerar mocks diários
+            np.random.seed(42)
+            today = datetime.today().date()
+            dates = pd.date_range(end=today, periods=180).to_pydatetime().tolist()
+            patrimonio = np.cumsum(np.random.normal(loc=50, scale=200, size=len(dates))) + 100000
+            cdi = 100000 * (1 + np.cumsum(np.repeat(0.0003, len(dates))))
+            carteira = patrimonio.copy()
+            df_evol_plot = pd.DataFrame({"date": dates, "Patrimônio": patrimonio, "cdi": cdi, "carteira": carteira})
+
+    # garantir colunas numéricas
+    for col in ["Patrimônio","cdi","carteira"]:
+        if col in df_evol_plot.columns:
+            df_evol_plot[col] = pd.to_numeric(df_evol_plot[col], errors='coerce')
+
+    # montar gráfico: Patrimônio (soma) vs CDI (linha de referência) vs Carteira (índice)
+    fig1 = go.Figure()
+    if "Patrimônio" in df_evol_plot.columns:
+        fig1.add_trace(go.Scatter(x=df_evol_plot['date'], y=df_evol_plot['Patrimônio'],
+                                  mode='lines+markers', name='Patrimônio (soma)',
+                                  line=dict(color='#1f77b4', width=2),
+                                  hovertemplate='%{x|%Y-%m-%d}: %{y:$,.2f}<extra></extra>'))
+    if "cdi" in df_evol_plot.columns:
+        # se cdi estiver em variação (pct), transformar para escala de patrimônio se necessário; aqui assumimos já em nível compatível
+        fig1.add_trace(go.Scatter(x=df_evol_plot['date'], y=df_evol_plot['cdi'],
+                                  mode='lines', name='CDI (referência)',
+                                  line=dict(color='#ff7f0e', width=2, dash='dash'),
+                                  hovertemplate='%{x|%Y-%m-%d}: %{y:$,.2f}<extra></extra>'))
+    if "carteira" in df_evol_plot.columns:
+        fig1.add_trace(go.Scatter(x=df_evol_plot['date'], y=df_evol_plot['carteira'],
+                                  mode='lines', name='Carteira (índice)',
+                                  line=dict(color='#636efa', width=2, dash='dot'),
+                                  hovertemplate='%{x|%Y-%m-%d}: %{y:$,.2f}<extra></extra>'))
+
+    fig1.update_layout(title="Evolução do Patrimônio vs CDI / Carteira",
+                       xaxis_title="Data", yaxis_title="Valor (R$)",
+                       height=420, legend_title_text="Séries", margin=dict(t=40,b=40,l=40,r=40))
+    st.caption("1) Evolução do Patrimônio vs CDI / Carteira (soma dos owners quando disponível)")
     st.plotly_chart(fig1, use_container_width=True)
     st.markdown("---")
-
-    # Performance infographic (tabela + acumulado)
-    render_performance_infographic(owner_a="Paula Casale", owner_b="Adolfo Pacheco", months=12)
-    st.markdown("---")
-
-    # Fluxo de caixa (resumo)
-    st.caption("2) Fluxo de Caixa Diário")
-    if not df_transactions.empty:
-        df_tx = df_transactions.copy()
-        df_tx["date"] = pd.to_datetime(df_tx["date"], errors="coerce").dt.date
-        df_daily = df_tx.groupby("date").agg(
-            entradas=("amount", lambda s: s[s>0].sum() if not s[s>0].empty else 0.0),
-            saidas=("amount", lambda s: -s[s<0].sum() if not s[s<0].empty else 0.0)
-        ).reset_index()
-        df_daily = df_daily.sort_values("date").tail(180)
-        fig2 = go.Figure()
-        fig2.add_trace(go.Bar(x=df_daily["date"], y=df_daily["entradas"], name="Entradas", marker_color="#2ca02c",
-                              text=df_daily["entradas"].apply(format_brl), textposition="auto"))
-        fig2.add_trace(go.Bar(x=df_daily["date"], y=df_daily["saidas"], name="Saídas", marker_color="#d62728",
-                              text=df_daily["saidas"].apply(format_brl), textposition="auto"))
-        fig2.update_layout(barmode='group', xaxis_title="Data", yaxis_title="Valor (R$)", height=420)
-        st.plotly_chart(fig2, use_container_width=True)
-    else:
-        fig2 = go.Figure()
-        dates = pd.date_range(end=datetime.today().date(), periods=180).to_pydatetime().tolist()
-        entradas = np.random.poisson(2, len(dates)) * np.random.uniform(50, 500, len(dates))
-        saidas = np.random.poisson(3, len(dates)) * np.random.uniform(20, 400, len(dates))
-        fig2.add_trace(go.Bar(x=dates, y=entradas, name="Entradas", marker_color="#2ca02c",
-                              text=[format_brl(v) for v in entradas], textposition="auto"))
-        fig2.add_trace(go.Bar(x=dates, y=saidas, name="Saídas", marker_color="#d62728",
-                              text=[format_brl(v) for v in saidas], textposition="auto"))
-        fig2.update_layout(barmode='group', xaxis_title="Data", yaxis_title="Valor (R$)", height=420)
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.markdown("---")
-    # (rest of Visão Geral continues: despesas, composição, KPIs — unchanged)
 
 #----------------- Fluxo de Caixa tab ----------------
 with tab_cash:
@@ -415,111 +429,5 @@ def render_visao_geral():
         st.plotly_chart(fig_indices, use_container_width=True)
     else:
         st.info("Nenhum dado de variações mensais (CDI/IPCA/IBOV/USD/Carteira) encontrado.")
-
-    st.markdown("---")
-
-    # Fluxo de caixa (existing)
-    st.caption("2) Fluxo de Caixa Diário")
-    if not df_transactions.empty:
-        df_tx = df_transactions.copy()
-        df_tx["date"] = pd.to_datetime(df_tx["date"], errors="coerce").dt.date
-        df_daily = df_tx.groupby("date").agg(
-            entradas=("amount", lambda s: s[s>0].sum() if not s[s>0].empty else 0.0),
-            saidas=("amount", lambda s: -s[s<0].sum() if not s[s<0].empty else 0.0)
-        ).reset_index()
-        df_daily = df_daily.sort_values("date").tail(180)
-        fig2 = go.Figure()
-        fig2.add_trace(go.Bar(x=df_daily["date"], y=df_daily["entradas"], name="Entradas", marker_color="#2ca02c",
-                              text=df_daily["entradas"].apply(format_brl), textposition="auto"))
-        fig2.add_trace(go.Bar(x=df_daily["date"], y=df_daily["saidas"], name="Saídas", marker_color="#d62728",
-                              text=df_daily["saidas"].apply(format_brl), textposition="auto"))
-        fig2.update_layout(barmode='group', xaxis_title="Data", yaxis_title="Valor (R$)", height=420)
-        st.plotly_chart(fig2, use_container_width=True)
-    else:
-        fig2 = go.Figure()
-        dates = pd.date_range(end=datetime.today().date(), periods=180).to_pydatetime().tolist()
-        entradas = np.random.poisson(2, len(dates)) * np.random.uniform(50, 500, len(dates))
-        saidas = np.random.poisson(3, len(dates)) * np.random.uniform(20, 400, len(dates))
-        fig2.add_trace(go.Bar(x=dates, y=entradas, name="Entradas", marker_color="#2ca02c",
-                              text=[format_brl(v) for v in entradas], textposition="auto"))
-        fig2.add_trace(go.Bar(x=dates, y=saidas, name="Saídas", marker_color="#d62728",
-                              text=[format_brl(v) for v in saidas], textposition="auto"))
-        fig2.update_layout(barmode='group', xaxis_title="Data", yaxis_title="Valor (R$)", height=420)
-        st.plotly_chart(fig2, use_container_width=True)
-
-    st.markdown("---")
-
-    # Despesas por categoria (existing)
-    st.caption("3) Principais despesas por categoria")
-    if not df_transactions.empty and "category" in df_transactions.columns:
-        df_tx = df_transactions.copy()
-        df_tx["amount"] = pd.to_numeric(df_tx["amount"], errors="coerce").fillna(0.0)
-        df_tx["expense"] = df_tx["amount"].apply(lambda x: -x if x < 0 else 0.0)
-        df_cat = df_tx.groupby("category", as_index=False)["expense"].sum()
-        df_cat = df_cat[df_cat["expense"] > 0].sort_values("expense", ascending=False).head(10)
-        if df_cat.empty:
-            st.info("Nenhuma despesa categorizada encontrada.")
-        else:
-            df_cat["expense_fmt"] = df_cat["expense"].apply(format_brl)
-            fig3 = px.pie(df_cat, names="category", values="expense", hole=0.35)
-            fig3.update_traces(textposition='inside', textinfo='percent+label',
-                               customdata=df_cat[["expense_fmt"]].values,
-                               hovertemplate="%{label}<br>%{customdata[0]}<extra></extra>")
-            fig3.update_layout(height=420)
-            st.plotly_chart(fig3, use_container_width=True)
-    else:
-        df_mock = pd.DataFrame({"categoria": ["Alimentação","Moradia","Transporte","Lazer","Saúde","Outros"], "valor": np.random.dirichlet(np.ones(6))*5000})
-        df_mock["valor_fmt"] = df_mock["valor"].apply(format_brl)
-        fig3 = px.pie(df_mock, names="categoria", values="valor", hole=0.35)
-        fig3.update_traces(textposition='inside', textinfo='percent+label',
-                           customdata=df_mock[["valor_fmt"]].values,
-                           hovertemplate="%{label}<br>%{customdata[0]}<extra></extra>")
-        fig3.update_layout(height=420)
-        st.plotly_chart(fig3, use_container_width=True)
-
-    st.markdown("---")
-
-    # Pequena tabela resumo (robust)
-    st.markdown("### Resumo")
-    # Saldo total
-    if not df_snapshots.empty:
-        latest = df_snapshots.sort_values("snapshot_date").iloc[-1]
-        saldo_total = float(latest.net_worth)
-    else:
-        try:
-            saldo_total = float(df_plot[df_plot['serie'] == 'Patrimônio']['valor'].iloc[-1])
-        except Exception:
-            saldo_total = 0.0
-
-    # Fluxo líquido últimos 30 dias
-    if 'df_daily' in locals():
-        try:
-            fluxo_30 = (df_daily['entradas'] - df_daily['saidas']).tail(30).sum()
-        except Exception:
-            fluxo_30 = 0.0
-    else:
-        fluxo_30 = 0.0
-
-    # Despesas últimos 30 dias
-    if 'df_cat' in locals():
-        try:
-            despesas_30 = float(df_cat['expense'].sum())
-        except Exception:
-            despesas_30 = 0.0
-    elif 'df_mock' in locals():
-        try:
-            despesas_30 = float(df_mock['valor'].sum())
-        except Exception:
-            despesas_30 = 0.0
-    else:
-        despesas_30 = 0.0
-
-    col_a, col_b, col_c = st.columns(3)
-    with col_a:
-        st.metric("Saldo Total", format_brl(saldo_total))
-    with col_b:
-        st.metric("Fluxo Líquido (últimos 30d)", format_brl(fluxo_30))
-    with col_c:
-        st.metric("Despesas (últimos 30d)", format_brl(despesas_30))
 
     st.markdown("---")

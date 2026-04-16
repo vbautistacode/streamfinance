@@ -7,7 +7,10 @@ from db import engine
 import time
 import uuid
 
-from utils import safe_rerun, format_brl as _format_brl
+# utilitários compartilhados: garantir format_brl e safe_rerun
+from utils import safe_rerun, format_brl as format_brl
+# manter alias antigo para compatibilidade com código existente
+_format_brl = format_brl
 
 # ---------------- Ensure assets schema (adds 'tipo' column if missing) ----------------
 def ensure_assets_schema():
@@ -19,15 +22,18 @@ def ensure_assets_schema():
     try:
         if dialect == "sqlite":
             with engine.connect() as conn:
-                # check if column exists
-                res = conn.execute(text("PRAGMA table_info(assets)")).fetchall()
-                cols = [r[1] for r in res]
-                if "tipo" not in cols:
-                    conn.execute(text("ALTER TABLE assets ADD COLUMN tipo TEXT"))
+                # check if table exists first
+                try:
+                    res = conn.execute(text("PRAGMA table_info(assets)")).fetchall()
+                    cols = [r[1] for r in res]
+                    if "tipo" not in cols:
+                        conn.execute(text("ALTER TABLE assets ADD COLUMN tipo TEXT"))
+                except Exception:
+                    # table may not exist yet; ignore
+                    pass
         else:
             # For other DBs, try to add column if not exists (generic SQL)
             with engine.begin() as conn:
-                # attempt to add column; many DBs support IF NOT EXISTS, but fallback to try/except
                 try:
                     conn.execute(text("ALTER TABLE assets ADD COLUMN tipo TEXT"))
                 except Exception:
@@ -58,7 +64,6 @@ def list_liabilities() -> pd.DataFrame:
 
 # ---------------- CRUD for assets (now with tipo) ----------------
 def add_asset(categoria: str, tipo: str, descricao: str, valor: float, source: str = "manual_form", import_batch_id: str = None):
-    # ensure schema again just before insert (safe)
     ensure_assets_schema()
     with engine.begin() as conn:
         # include tipo column if present
@@ -77,13 +82,11 @@ def add_asset(categoria: str, tipo: str, descricao: str, valor: float, source: s
 def update_asset(asset_id: int, categoria: str, tipo: str, descricao: str, valor: float):
     ensure_assets_schema()
     with engine.begin() as conn:
-        # try update including tipo
         try:
             conn.execute(text("""
                 UPDATE assets SET categoria=:categoria, tipo=:tipo, descricao=:descricao, valor=:valor WHERE id=:id
             """), {"categoria": categoria, "tipo": tipo, "descricao": descricao, "valor": valor, "id": asset_id})
         except Exception:
-            # fallback to update without tipo
             conn.execute(text("""
                 UPDATE assets SET categoria=:categoria, descricao=:descricao, valor=:valor WHERE id=:id
             """), {"categoria": categoria, "descricao": descricao, "valor": valor, "id": asset_id})
@@ -115,6 +118,8 @@ def aggregate_assets_by_category() -> pd.DataFrame:
     df = list_assets()
     if df.empty:
         return pd.DataFrame(columns=["categoria", "valor"])
+    if "categoria" not in df.columns or "valor" not in df.columns:
+        return pd.DataFrame(columns=["categoria", "valor"])
     return df.groupby("categoria", as_index=False)["valor"].sum()
 
 def aggregate_assets_by_type() -> pd.DataFrame:
@@ -123,11 +128,15 @@ def aggregate_assets_by_type() -> pd.DataFrame:
         return pd.DataFrame(columns=["tipo", "valor"])
     if "tipo" not in df.columns:
         df["tipo"] = "N/A"
+    if "valor" not in df.columns:
+        df["valor"] = 0.0
     return df.groupby("tipo", as_index=False)["valor"].sum()
 
 def aggregate_liabilities_by_category() -> pd.DataFrame:
     df = list_liabilities()
     if df.empty:
+        return pd.DataFrame(columns=["categoria", "valor"])
+    if "categoria" not in df.columns or "valor" not in df.columns:
         return pd.DataFrame(columns=["categoria", "valor"])
     return df.groupby("categoria", as_index=False)["valor"].sum()
 
@@ -149,16 +158,21 @@ def render_controle_ui():
             a_valor = st.number_input("Valor (R$)", min_value=0.0, step=100.0, format="%.2f", key="add_val")
             submitted_asset = st.form_submit_button("Adicionar ativo")
             if submitted_asset:
-                import_batch_id = f"manual_asset_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-                try:
-                    add_asset(a_categoria, a_tipo, a_descricao, a_valor, source="manual_form", import_batch_id=import_batch_id)
-                    st.success("Ativo adicionado com sucesso.")
-                except Exception as e:
-                    st.error(f"Falha ao adicionar ativo: {e}")
-                safe_rerun()
+                # validação mínima
+                if not a_descricao:
+                    st.error("Descrição é obrigatória.")
+                elif a_valor <= 0:
+                    st.error("Valor deve ser maior que zero.")
+                else:
+                    import_batch_id = f"manual_asset_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+                    try:
+                        add_asset(a_categoria, a_tipo, a_descricao, a_valor, source="manual_form", import_batch_id=import_batch_id)
+                        st.success("Ativo adicionado com sucesso.")
+                    except Exception as e:
+                        st.error(f"Falha ao adicionar ativo: {e}")
+                    safe_rerun()
 
     with col_right:
-        
         st.subheader("Adicionar passivo / dívida")
         with st.form("form_add_liability_local", clear_on_submit=True):
             l_categoria = st.selectbox("Categoria (passivo)", ["Financiamento Imobiliário","Empréstimo Pessoal","Cartão de Crédito","Outros"], key="add_liab_cat")
@@ -166,102 +180,129 @@ def render_controle_ui():
             l_valor = st.number_input("Valor (R$)", min_value=0.0, step=100.0, format="%.2f", key="add_liab_val")
             submitted_liab = st.form_submit_button("Adicionar passivo")
             if submitted_liab:
-                import_batch_id = f"manual_liab_{int(time.time())}_{uuid.uuid4().hex[:6]}"
-                try:
-                    add_liability(l_categoria, l_descricao, l_valor, source="manual_form", import_batch_id=import_batch_id)
-                    st.success("Passivo adicionado com sucesso.")
-                except Exception as e:
-                    st.error(f"Falha ao adicionar passivo: {e}")
-                safe_rerun()
+                if not l_descricao:
+                    st.error("Descrição do passivo é obrigatória.")
+                elif l_valor <= 0:
+                    st.error("Valor do passivo deve ser maior que zero.")
+                else:
+                    import_batch_id = f"manual_liab_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+                    try:
+                        add_liability(l_categoria, l_descricao, l_valor, source="manual_form", import_batch_id=import_batch_id)
+                        st.success("Passivo adicionado com sucesso.")
+                    except Exception as e:
+                        st.error(f"Falha ao adicionar passivo: {e}")
+                    safe_rerun()
 
     st.markdown("---")
     # Quick KPIs for assets by type
     st.subheader("Resumo rápido")
     df_assets = list_assets()
     df_liab = list_liabilities()
-    total_assets = float(df_assets["valor"].sum()) if not df_assets.empty else 0.0
-    total_liab = float(df_liab["valor"].sum()) if not df_liab.empty else 0.0
+
+    # garantir colunas
+    if df_assets.empty or "valor" not in df_assets.columns:
+        total_assets = 0.0
+    else:
+        total_assets = float(df_assets["valor"].astype(float).sum())
+
+    if df_liab.empty or "valor" not in df_liab.columns:
+        total_liab = 0.0
+    else:
+        total_liab = float(df_liab["valor"].astype(float).sum())
+
     net_worth = total_assets - total_liab
-    st.metric("Ativos Totais", _format_brl(total_assets))
-    st.metric("Passivos Totais", _format_brl(total_liab))
-    st.metric("Patrimônio Líquido", _format_brl(net_worth))
+    st.metric("Ativos Totais", format_brl(total_assets))
+    st.metric("Passivos Totais", format_brl(total_liab))
+    st.metric("Patrimônio Líquido", format_brl(net_worth))
 
     st.markdown("---")
     st.subheader("Visão dos Ativos")
 
     # Charts: distribution by type and by category
     df_assets = list_assets()
-    if df_assets.empty:
+    if df_assets.empty or "valor" not in df_assets.columns:
         st.info("Nenhum ativo registrado ainda.")
+        return
+
+    # ensure tipo column exists in df
+    if "tipo" not in df_assets.columns:
+        df_assets["tipo"] = "N/A"
+    if "categoria" not in df_assets.columns:
+        df_assets["categoria"] = "Outros"
+    if "descricao" not in df_assets.columns:
+        df_assets["descricao"] = ""
+
+    # Aggregate by type
+    agg_type = df_assets.groupby("tipo", as_index=False)["valor"].sum().sort_values("valor", ascending=False)
+    agg_cat = df_assets.groupby("categoria", as_index=False)["valor"].sum().sort_values("valor", ascending=False)
+
+    # Bar chart by type
+    st.markdown("**Distribuição por Tipo**")
+    try:
+        import plotly.express as px
+        fig_type = px.bar(agg_type, x="tipo", y="valor", text="valor", labels={"valor":"Valor (R$)","tipo":"Tipo"})
+        fig_type.update_traces(texttemplate="%{text:.2f}", textposition="outside")
+        fig_type.update_layout(yaxis_tickformat=",.0f", height=320, margin=dict(t=30, b=30))
+        st.plotly_chart(fig_type, width='stretch')
+    except Exception:
+        st.table(agg_type.assign(valor=lambda d: d["valor"].map(_format_brl)))
+
+    st.markdown("**Distribuição por Categoria**")
+    try:
+        fig_cat = px.pie(agg_cat, names="categoria", values="valor", hole=0.35)
+        fig_cat.update_traces(textposition='inside', textinfo='percent+label')
+        fig_cat.update_layout(height=320, margin=dict(t=30, b=30))
+        st.plotly_chart(fig_cat, width='stretch')
+    except Exception:
+        st.table(agg_cat.assign(valor=lambda d: d["valor"].map(_format_brl)))
+
+    st.markdown("---")
+    st.subheader("Lista detalhada de ativos")
+    # Provide searchable/filterable table and expanders per asset
+    cols_filter = st.columns([2,2,1])
+    with cols_filter[0]:
+        q_text = st.text_input("Buscar descrição / símbolo", value="", key="filter_text")
+    with cols_filter[1]:
+        tipos_list = sorted(df_assets["tipo"].dropna().unique().tolist()) if "tipo" in df_assets.columns else []
+        q_tipo = st.selectbox("Filtrar por tipo", options=["Todos"] + tipos_list, key="filter_tipo")
+    with cols_filter[2]:
+        q_min = st.number_input("Valor mínimo (R$)", min_value=0.0, value=0.0, format="%.2f", key="filter_min")
+
+    df_filtered = df_assets.copy()
+    if q_text:
+        df_filtered = df_filtered[df_filtered["descricao"].str.contains(q_text, case=False, na=False) | df_filtered.get("categoria", "").str.contains(q_text, case=False, na=False)]
+    if q_tipo and q_tipo != "Todos":
+        df_filtered = df_filtered[df_filtered["tipo"] == q_tipo]
+    if q_min and q_min > 0:
+        df_filtered = df_filtered[df_filtered["valor"].astype(float) >= float(q_min)]
+
+    # show table safely
+    display = df_filtered.copy()
+    display["valor_fmt"] = display["valor"].apply(lambda v: format_brl(v))
+    display_cols = []
+    for c in ["id", "categoria", "tipo", "descricao", "valor_fmt"]:
+        if c in display.columns:
+            display_cols.append(c)
+    # rename valor_fmt to valor for display
+    if "valor_fmt" in display_cols:
+        display = display.rename(columns={"valor_fmt": "valor"})
+        display_cols = [c if c != "valor_fmt" else "valor" for c in display_cols]
+    st.dataframe(display[display_cols], width='stretch')
+
+    # Expanders for each asset to edit/delete
+    st.markdown("#### Editar / Remover ativos")
+    # garantir coluna id para edição
+    if "id" not in df_filtered.columns:
+        st.info("Ativos sem identificador (id) não podem ser editados via UI.")
     else:
-        # ensure tipo column exists in df
-        if "tipo" not in df_assets.columns:
-            df_assets["tipo"] = "N/A"
-
-        # Aggregate by type
-        agg_type = df_assets.groupby("tipo", as_index=False)["valor"].sum().sort_values("valor", ascending=False)
-        agg_cat = df_assets.groupby("categoria", as_index=False)["valor"].sum().sort_values("valor", ascending=False)
-
-        # Bar chart by type
-        st.markdown("**Distribuição por Tipo**")
-        try:
-            import plotly.express as px
-            fig_type = px.bar(agg_type, x="tipo", y="valor", text="valor", labels={"valor":"Valor (R$)","tipo":"Tipo"})
-            fig_type.update_traces(texttemplate="%{text:.2f}", textposition="outside")
-            fig_type.update_layout(yaxis_tickformat=",.0f", height=320, margin=dict(t=30, b=30))
-            st.plotly_chart(fig_type, use_container_width=True)
-        except Exception:
-            # fallback simple table
-            st.table(agg_type.assign(valor=lambda d: d["valor"].map(_format_brl)))
-
-        st.markdown("**Distribuição por Categoria**")
-        try:
-            fig_cat = px.pie(agg_cat, names="categoria", values="valor", hole=0.35)
-            fig_cat.update_traces(textposition='inside', textinfo='percent+label')
-            fig_cat.update_layout(height=320, margin=dict(t=30, b=30))
-            st.plotly_chart(fig_cat, use_container_width=True)
-        except Exception:
-            st.table(agg_cat.assign(valor=lambda d: d["valor"].map(_format_brl)))
-
-        st.markdown("---")
-        st.subheader("Lista detalhada de ativos")
-        # Provide searchable/filterable table and expanders per asset
-        # Add a small filter row
-        cols_filter = st.columns([2,2,1])
-        with cols_filter[0]:
-            q_text = st.text_input("Buscar descrição / símbolo", value="", key="filter_text")
-        with cols_filter[1]:
-            q_tipo = st.selectbox("Filtrar por tipo", options=["Todos"] + sorted(df_assets["tipo"].dropna().unique().tolist()), key="filter_tipo")
-        with cols_filter[2]:
-            q_min = st.number_input("Valor mínimo (R$)", min_value=0.0, value=0.0, format="%.2f", key="filter_min")
-
-        df_filtered = df_assets.copy()
-        if q_text:
-            df_filtered = df_filtered[df_filtered["descricao"].str.contains(q_text, case=False, na=False) | df_filtered.get("categoria", "").str.contains(q_text, case=False, na=False)]
-        if q_tipo and q_tipo != "Todos":
-            df_filtered = df_filtered[df_filtered["tipo"] == q_tipo]
-        if q_min and q_min > 0:
-            df_filtered = df_filtered[df_filtered["valor"].astype(float) >= float(q_min)]
-
-        # show table
-        display = df_filtered.copy()
-        # format valor for display
-        display["valor_fmt"] = display["valor"].apply(lambda v: _format_brl(v))
-        display_cols = ["id", "categoria", "tipo", "descricao", "valor_fmt"]
-        st.dataframe(display[display_cols].rename(columns={"valor_fmt":"valor"}), use_container_width=True)
-
-        # Expanders for each asset to edit/delete
-        st.markdown("#### Editar / Remover ativos")
         for _, row in df_filtered.sort_values("valor", ascending=False).iterrows():
             aid = int(row["id"])
-            title = f"{row.get('categoria','')} — {row.get('tipo','')} — {row.get('descricao','')} — {_format_brl(row.get('valor',0))}"
+            title = f"{row.get('categoria','')} — {row.get('tipo','')} — {row.get('descricao','')} — {format_brl(row.get('valor',0))}"
             with st.expander(title):
-                # show details
                 st.write("Categoria:", row.get("categoria"))
                 st.write("Tipo:", row.get("tipo"))
                 st.write("Descrição:", row.get("descricao"))
-                st.write("Valor:", _format_brl(row.get("valor",0)))
-                # edit form
+                st.write("Valor:", format_brl(row.get("valor",0)))
                 with st.form(f"edit_asset_{aid}", clear_on_submit=False):
                     categories = ["Imóveis","Bens Móveis","Empresas","Novos Negócios","Investimentos","Outros"]
                     types = asset_types
@@ -296,7 +337,7 @@ def render_controle_ui():
     df_liab = list_liabilities()
 
     # Build assets from holdings + manual assets
-    if df_holdings.empty and df_assets.empty and df_liab.empty:
+    if (df_holdings is None or df_holdings.empty) and (df_assets is None or df_assets.empty) and (df_liab is None or df_liab.empty):
         assets = [
             {"categoria": "Imóveis", "descricao": "Apartamento SP", "valor": 650000},
             {"categoria": "Imóveis", "descricao": "Casa de praia", "valor": 420000},
@@ -314,21 +355,24 @@ def render_controle_ui():
         df_liab_display = pd.DataFrame(liabilities)
     else:
         parts = []
-        if not df_holdings.empty:
+        if df_holdings is not None and not df_holdings.empty:
             df_h = df_holdings.copy()
             if "market_value" in df_h.columns:
-                df_h["valor"] = df_h["market_value"].astype(float)
+                df_h["valor"] = pd.to_numeric(df_h["market_value"], errors="coerce").fillna(0.0)
             elif "quantity" in df_h.columns and "avg_cost" in df_h.columns:
-                df_h["valor"] = df_h["quantity"].astype(float) * df_h["avg_cost"].astype(float)
+                df_h["valor"] = pd.to_numeric(df_h["quantity"], errors="coerce").fillna(0.0) * pd.to_numeric(df_h["avg_cost"], errors="coerce").fillna(0.0)
             else:
                 df_h["valor"] = 0.0
             df_h["categoria"] = df_h.get("category", "Investimentos")
             df_h["descricao"] = df_h.get("asset_symbol", "")
             parts.append(df_h[["categoria","descricao","valor"]])
-        if not df_assets.empty:
-            parts.append(df_assets[["categoria","descricao","valor"]])
+        if df_assets is not None and not df_assets.empty:
+            # garantir colunas
+            cols = [c for c in ["categoria","descricao","valor"] if c in df_assets.columns]
+            if cols:
+                parts.append(df_assets[cols])
         df_assets_display = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["categoria","descricao","valor"])
-        df_liab_display = df_liab[["categoria","descricao","valor"]] if not df_liab.empty else pd.DataFrame(columns=["categoria","descricao","valor"])
+        df_liab_display = df_liab[["categoria","descricao","valor"]] if (df_liab is not None and not df_liab.empty and all(c in df_liab.columns for c in ["categoria","descricao","valor"])) else pd.DataFrame(columns=["categoria","descricao","valor"])
 
     agg_assets = df_assets_display.groupby("categoria", as_index=False)["valor"].sum() if not df_assets_display.empty else pd.DataFrame(columns=["categoria","valor"])
     agg_liab = df_liab_display.groupby("categoria", as_index=False)["valor"].sum() if not df_liab_display.empty else pd.DataFrame(columns=["categoria","valor"])
@@ -348,33 +392,37 @@ def render_controle_ui():
 
     st.markdown("#### Distribuição de ativos por categoria")
     if not agg_assets.empty:
+        import plotly.express as px
         fig_assets_pie = px.pie(agg_assets, names="categoria", values="valor", hole=0.35)
         fig_assets_pie.update_traces(textinfo="percent+label")
-        st.plotly_chart(fig_assets_pie, use_container_width=True)
+        st.plotly_chart(fig_assets_pie, width='stretch')
     else:
         st.info("Nenhum ativo registrado ainda.")
 
     st.markdown("#### Detalhe de ativos")
     if not df_assets_display.empty:
         df_display = df_assets_display.copy()
-        df_display["valor"] = df_display["valor"].apply(format_brl)
-        st.dataframe(df_display, use_container_width=True)
+        if "valor" in df_display.columns:
+            df_display["valor"] = df_display["valor"].apply(format_brl)
+        st.dataframe(df_display, width='stretch')
     else:
         st.write("Nenhum ativo detalhado disponível.")
 
     st.markdown("#### Distribuição de passivos por categoria")
     if not agg_liab.empty:
+        import plotly.express as px
         fig_liab = px.bar(agg_liab, x="categoria", y="valor", labels={"valor":"Valor (R$)","categoria":"Categoria"}, text="valor")
         fig_liab.update_traces(texttemplate="R$ %{y:,.0f}")
         fig_liab.update_layout(yaxis_tickformat=",.0f")
-        st.plotly_chart(fig_liab, use_container_width=True)
+        st.plotly_chart(fig_liab, width='stretch')
     else:
         st.info("Nenhum passivo registrado ainda.")
 
     st.markdown("#### Detalhe de passivos")
     if not df_liab_display.empty:
         df_display_l = df_liab_display.copy()
-        df_display_l["valor"] = df_display_l["valor"].apply(format_brl)
-        st.dataframe(df_display_l, use_container_width=True)
+        if "valor" in df_display_l.columns:
+            df_display_l["valor"] = df_display_l["valor"].apply(format_brl)
+        st.dataframe(df_display_l, width='stretch')
     else:
         st.write("Nenhum passivo detalhado disponível.")
