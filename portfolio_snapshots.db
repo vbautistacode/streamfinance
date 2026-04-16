@@ -1,0 +1,15 @@
+-- migration: create portfolio_snapshots
+CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner TEXT NOT NULL,
+  snapshot_date DATE NOT NULL,
+  asset_id TEXT,            -- identificador/ticker opcional
+  descricao TEXT,
+  categoria TEXT,
+  saldo NUMERIC NOT NULL,
+  alocacao NUMERIC,         -- percentual (0-100) ou NULL
+  import_batch_id TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_portfolio_owner_date ON portfolio_snapshots(owner, snapshot_date);
