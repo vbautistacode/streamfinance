@@ -146,7 +146,6 @@ def aggregate_liabilities_by_category() -> pd.DataFrame:
         return pd.DataFrame(columns=["categoria", "valor"])
     return df.groupby("categoria", as_index=False)["valor"].sum()
 
-
 # ---------------- Render function moved to this module ----------------
 def render_controle_ui():
     st.header("Controle de Investimentos")
