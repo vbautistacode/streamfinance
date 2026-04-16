@@ -41,7 +41,7 @@ st.set_page_config(page_title="StreamDash — Finanças Pessoais", layout="wide"
 st.title("StreamDash — Finanças Pessoais")
 
 # ---------------- Top navigation as tabs ----------------
-tab_visao, tab_ips, tab_controle = st.tabs(["Visão Geral", "IPS", "Controle de Investimentos"])
+tab_visao, tab_controle, tab_ips = st.tabs(["Início", "Controle de Investimentos","IPS",])
 
 # ---------------- Shared sidebar: upload + series (kept minimal) ----------------
 st.sidebar.title("Ferramentas")
