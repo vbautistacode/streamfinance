@@ -456,3 +456,65 @@ def render_controle_ui():
         st.dataframe(df_display_l, width='stretch')
     else:
         st.write("Nenhum passivo detalhado disponível.")
+
+# --- Função helper para semear dados mockados (para desenvolvimento / testes) ---
+def seed_mock_portfolio_samples(commit_to_assets: bool = False):
+    """
+    Insere dois snapshots mockados no banco usando save_portfolio_snapshot.
+    Use apenas em ambiente de desenvolvimento. Retorna dict com contagens.
+    """
+    from datetime import date
+    results = {"inserted_1": 0, "inserted_2": 0, "synced_1": 0, "synced_2": 0}
+
+    # Snapshot 1 (baseado na primeira imagem)
+    owner1 = "Paula Casale"
+    snapshot_date1 = date.today()
+    data1 = [
+        {"descricao": "VINLAND SELECAO INFR", "categoria": "Fundo de Investimento", "saldo": 171736.83, "alocacao": 20.71},
+        {"descricao": "ITAU KINEA ANDES RF", "categoria": "Fundo de Investimento", "saldo": 135807.12, "alocacao": 16.38},
+        {"descricao": "ACTIVE FIX ALL RF CP", "categoria": "Fundo de Investimento", "saldo": 104130.07, "alocacao": 12.56},
+        {"descricao": "ABSOLUTE HIDRA INFRA", "categoria": "Fundo de Investimento", "saldo": 56295.29, "alocacao": 6.79},
+        {"descricao": "DIF CP FICFI", "categoria": "Fundo de Investimento", "saldo": 36640.70, "alocacao": 4.42},
+        {"descricao": "CDBB24A27D3 CDB BANCO C6", "categoria": "CDB, Renda Fixa e Inv. Estruturados", "saldo": 154816.22, "alocacao": 18.67},
+        {"descricao": "COE SP 500 GANHO GARANTI ITAU", "categoria": "CDB, Renda Fixa e Inv. Estruturados", "saldo": 57327.24, "alocacao": 6.91},
+        {"descricao": "CDB6247W6TG CDB BANCO C6", "categoria": "CDB, Renda Fixa e Inv. Estruturados", "saldo": 55920.90, "alocacao": 6.74},
+        {"descricao": "IT7824LEQOI COE ITAU UNIBANCO", "categoria": "CDB, Renda Fixa e Inv. Estruturados", "saldo": 32926.81, "alocacao": 3.97},
+        {"descricao": "CDBB24A26V3 CDB NOVO BANCO", "categoria": "CDB, Renda Fixa e Inv. Estruturados", "saldo": 23712.08, "alocacao": 2.86},
+    ]
+    df1 = pd.DataFrame(data1)
+    try:
+        results["inserted_1"] = save_portfolio_snapshot(df1, owner1, snapshot_date1, import_batch_id=f"mock_{int(time.time())}_1")
+    except Exception as e:
+        results["inserted_1"] = 0
+
+    # Snapshot 2 (baseado na segunda imagem / rentab. simulada)
+    owner2 = "Adolfo Pacheco"
+    snapshot_date2 = date.today()
+    data2 = [
+        {"descricao": "1a. Prev Itau Absol Atenas Rf Cp Vgbl", "categoria": "Previdência", "saldo": 580678.87, "alocacao": 80.22},
+        {"descricao": "CDB62489SRY CDB VIA CERTA FINANCIADORA", "categoria": "CDB, Renda Fixa e Inv. Estruturados", "saldo": 75483.98, "alocacao": 10.43},
+        {"descricao": "CDB62489TJ2 CDB BANCO C6 CONSIGNADO", "categoria": "CDB, Renda Fixa e Inv. Estruturados", "saldo": 67289.65, "alocacao": 9.30},
+        {"descricao": "PRIVILEGE RF REF DI", "categoria": "Fundo de Investimento", "saldo": 328.14, "alocacao": 0.05},
+        {"descricao": "SUPER DI", "categoria": "Fundo de Investimento", "saldo": 62.68, "alocacao": 0.01},
+    ]
+    df2 = pd.DataFrame(data2)
+    try:
+        results["inserted_2"] = save_portfolio_snapshot(df2, owner2, snapshot_date2, import_batch_id=f"mock_{int(time.time())}_2")
+    except Exception as e:
+        results["inserted_2"] = 0
+
+    # opcional: sincronizar assets top-level a partir dos snapshots
+    if commit_to_assets:
+        try:
+            results["synced_1"] = sync_assets_from_snapshot(owner1, snapshot_date1, import_batch_id=f"mock_sync_{int(time.time())}_1")
+        except Exception:
+            results["synced_1"] = 0
+        try:
+            results["synced_2"] = sync_assets_from_snapshot(owner2, snapshot_date2, import_batch_id=f"mock_sync_{int(time.time())}_2")
+        except Exception:
+            results["synced_2"] = 0
+
+    return results
+
+# Exemplo de uso (descomente para rodar manualmente em dev)
+print(seed_mock_portfolio_samples(commit_to_assets=False))
