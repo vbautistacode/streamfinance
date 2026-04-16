@@ -7,6 +7,196 @@ from db import engine
 import time
 import uuid
 
+# --- portfolio snapshots support ---
+import io
+from datetime import date
+import pandas as pd
+from sqlalchemy import text
+
+def ensure_portfolio_schema():
+    """
+    Cria a tabela portfolio_snapshots se não existir.
+    Campos: id, owner, snapshot_date, asset_id, descricao, categoria, saldo, alocacao, import_batch_id, created_at
+    """
+    try:
+        dialect = engine.dialect.name.lower()
+        with engine.begin() as conn:
+            if dialect == "sqlite":
+                conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    owner TEXT NOT NULL,
+                    snapshot_date DATE NOT NULL,
+                    asset_id TEXT,
+                    descricao TEXT,
+                    categoria TEXT,
+                    saldo NUMERIC NOT NULL,
+                    alocacao NUMERIC,
+                    import_batch_id TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_portfolio_owner_date ON portfolio_snapshots(owner, snapshot_date)"))
+            else:
+                # Generic SQL: tenta criar tabela (Postgres/MySQL compatível)
+                try:
+                    conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+                        id SERIAL PRIMARY KEY,
+                        owner TEXT NOT NULL,
+                        snapshot_date DATE NOT NULL,
+                        asset_id TEXT,
+                        descricao TEXT,
+                        categoria TEXT,
+                        saldo NUMERIC NOT NULL,
+                        alocacao NUMERIC,
+                        import_batch_id TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """))
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_portfolio_owner_date ON portfolio_snapshots(owner, snapshot_date)"))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+# garantir schema ao importar o módulo
+ensure_portfolio_schema()
+
+def _normalize_snapshot_df(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Normaliza nomes de colunas comuns para: descricao, categoria, saldo, alocacao, asset_id.
+    Converte saldo e alocacao para numérico.
+    """
+    if df is None:
+        return pd.DataFrame()
+    df2 = df.copy()
+    col_map = {}
+    for c in df2.columns:
+        lc = c.lower().strip()
+        if lc in ("descricao","description","asset","ativo","nome"):
+            col_map[c] = "descricao"
+        elif lc in ("categoria","category","type","tipo"):
+            col_map[c] = "categoria"
+        elif lc in ("saldo","balance","valor","valor (r$)","saldo atual"):
+            col_map[c] = "saldo"
+        elif lc in ("alocacao","alocação","allocation","pct","percent"):
+            col_map[c] = "alocacao"
+        elif lc in ("asset_id","ticker","codigo","symbol"):
+            col_map[c] = "asset_id"
+    df2 = df2.rename(columns=col_map)
+    if "saldo" not in df2.columns:
+        # tentar detectar coluna numérica mais provável
+        numeric_candidates = [c for c in df2.columns if pd.api.types.is_numeric_dtype(df2[c])]
+        if numeric_candidates:
+            df2 = df2.rename(columns={numeric_candidates[0]: "saldo"})
+    # limpar e converter saldo
+    if "saldo" in df2.columns:
+        df2["saldo"] = df2["saldo"].astype(str).str.replace(r"[R$\s]", "", regex=True).str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
+        df2["saldo"] = pd.to_numeric(df2["saldo"], errors="coerce").fillna(0.0)
+    if "alocacao" in df2.columns:
+        df2["alocacao"] = df2["alocacao"].astype(str).str.replace("%","").str.replace(",", ".")
+        df2["alocacao"] = pd.to_numeric(df2["alocacao"], errors="coerce").fillna(None)
+    return df2
+
+def save_portfolio_snapshot(df: pd.DataFrame, owner: str, snapshot_date: date, import_batch_id: str = None) -> int:
+    """
+    Persiste linhas de snapshot em portfolio_snapshots.
+    df deve ter colunas: descricao, categoria (opcional), saldo, alocacao (opcional), asset_id (opcional)
+    Retorna número de linhas inseridas.
+    """
+    if df is None or df.empty:
+        return 0
+    df2 = _normalize_snapshot_df(df)
+    if "saldo" not in df2.columns:
+        raise ValueError("Coluna de saldo não encontrada no DataFrame.")
+    inserted = 0
+    with engine.begin() as conn:
+        for _, r in df2.iterrows():
+            try:
+                conn.execute(text("""
+                    INSERT INTO portfolio_snapshots (owner, snapshot_date, asset_id, descricao, categoria, saldo, alocacao, import_batch_id)
+                    VALUES (:owner, :snapshot_date, :asset_id, :descricao, :categoria, :saldo, :alocacao, :ib)
+                """), {
+                    "owner": owner,
+                    "snapshot_date": snapshot_date,
+                    "asset_id": r.get("asset_id"),
+                    "descricao": r.get("descricao"),
+                    "categoria": r.get("categoria"),
+                    "saldo": float(r["saldo"]),
+                    "alocacao": float(r["alocacao"]) if r.get("alocacao") is not None else None,
+                    "ib": import_batch_id
+                })
+                inserted += 1
+            except Exception:
+                # ignorar linha problemática para não abortar todo o batch
+                continue
+    return inserted
+
+def import_portfolio_file(file_like, owner: str, snapshot_date: date = None, import_batch_id: str = None) -> dict:
+    """
+    Lê CSV/XLSX e persiste em portfolio_snapshots.
+    Retorna dict {inserted: int, errors: int, error: str?}
+    """
+    if snapshot_date is None:
+        snapshot_date = date.today()
+    try:
+        name = getattr(file_like, "name", "")
+        if isinstance(file_like, str) and file_like.lower().endswith(".csv"):
+            df = pd.read_csv(file_like)
+        elif isinstance(file_like, str) and (file_like.lower().endswith(".xls") or file_like.lower().endswith(".xlsx")):
+            df = pd.read_excel(file_like, sheet_name=0)
+        else:
+            # file-like uploaded via Streamlit
+            if str(name).lower().endswith(".csv"):
+                df = pd.read_csv(file_like)
+            else:
+                df = pd.read_excel(file_like, sheet_name=0)
+    except Exception as e:
+        return {"inserted": 0, "errors": 1, "error": f"Falha ao ler arquivo: {e}"}
+    try:
+        n = save_portfolio_snapshot(df, owner, snapshot_date, import_batch_id=import_batch_id)
+        return {"inserted": n, "errors": 0}
+    except Exception as e:
+        return {"inserted": 0, "errors": 1, "error": str(e)}
+
+def get_portfolio_by_owner_date(owner: str, snapshot_date: date) -> pd.DataFrame:
+    try:
+        with engine.connect() as conn:
+            df = pd.read_sql(text("SELECT * FROM portfolio_snapshots WHERE owner = :owner AND snapshot_date = :sd"), conn, params={"owner": owner, "sd": snapshot_date})
+            return df
+    except Exception:
+        return pd.DataFrame()
+
+def sync_assets_from_snapshot(owner: str, snapshot_date: date, upsert_assets: bool = True, import_batch_id: str = None) -> int:
+    """
+    Opcional: sincroniza top-level assets com os saldos do snapshot.
+    Para cada linha do snapshot, insere/atualiza em assets com source='snapshot'.
+    Retorna número de assets upsertados.
+    """
+    df = get_portfolio_by_owner_date(owner, snapshot_date)
+    if df.empty:
+        return 0
+    upserted = 0
+    with engine.begin() as conn:
+        for _, r in df.iterrows():
+            descricao = r.get("descricao") or r.get("asset_id") or "Sem descrição"
+            categoria = r.get("categoria") or "Investimentos"
+            valor = float(r.get("saldo") or 0.0)
+            # tentar encontrar asset existente por descricao
+            try:
+                existing = conn.execute(text("SELECT id FROM assets WHERE descricao = :d LIMIT 1"), {"d": descricao}).fetchone()
+                if existing:
+                    conn.execute(text("UPDATE assets SET categoria=:categoria, valor=:valor, source='snapshot', import_batch_id=:ib WHERE id=:id"),
+                                 {"categoria": categoria, "valor": valor, "ib": import_batch_id, "id": existing[0]})
+                else:
+                    conn.execute(text("INSERT INTO assets (categoria, descricao, valor, source, import_batch_id) VALUES (:categoria, :descricao, :valor, 'snapshot', :ib)"),
+                                 {"categoria": categoria, "descricao": descricao, "valor": valor, "ib": import_batch_id})
+                upserted += 1
+            except Exception:
+                continue
+    return upserted
+
 # utilitários compartilhados: garantir format_brl e safe_rerun
 from utils import safe_rerun, format_brl as format_brl
 _format_brl = format_brl
@@ -143,6 +333,28 @@ def aggregate_liabilities_by_category() -> pd.DataFrame:
 
 # ---------------- Render function moved to this module ----------------
 def render_controle_ui():
+
+    with st.form("import_portfolio", clear_on_submit=True):
+        owner = st.selectbox("Owner", ["Paula Casale", "Adolfo Pacheco"], index=0)
+        snapshot_date = st.date_input("Data do snapshot", value=datetime.today().date())
+        uploaded = st.file_uploader("Arquivo CSV/XLSX", type=["csv","xlsx"])
+        submit = st.form_submit_button("Importar snapshot")
+        if submit:
+            if uploaded is None:
+                st.error("Envie um arquivo CSV ou XLSX.")
+            else:
+                import_batch_id = f"portfolio_{owner}_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+                from investment import import_portfolio_file, sync_assets_from_snapshot
+                res = import_portfolio_file(uploaded, owner=owner, snapshot_date=snapshot_date, import_batch_id=import_batch_id)
+                if res.get("errors", 1) == 0:
+                    st.success(f"{res.get('inserted',0)} linhas importadas.")
+                    # opcional: sincronizar assets top-level
+                    synced = sync_assets_from_snapshot(owner, snapshot_date, import_batch_id=import_batch_id)
+                    if synced:
+                        st.info(f"{synced} assets sincronizados a partir do snapshot.")
+                else:
+                    st.error(f"Falha na importação: {res.get('error')}")
+
     st.header("Controle de Investimentos")
 
     # layout: left = form + quick stats, right = charts + list
