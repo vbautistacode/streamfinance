@@ -117,7 +117,7 @@ def render_performance_infographic(owner_a="Paula Casale", owner_b="Adolfo Pache
         if df is None or df.empty:
             return pd.DataFrame()
         df = df.copy()
-        df['period'] = pd.to_datetime(df['period'])
+        df['period'] = pd.to_datetime(df['period'], errors='coerce')
         if 'patrimonio' in df.columns:
             df['patrimonio'] = pd.to_numeric(df['patrimonio'], errors='coerce')
         for c in ['cdi','ipca','ibov','usd','carteira']:
@@ -156,53 +156,65 @@ def render_performance_infographic(owner_a="Paula Casale", owner_b="Adolfo Pache
             return pd.DataFrame()
         if len(parts) == 1:
             merged = parts[0].copy()
-            merged = merged.rename(columns={'pat1':'pat_soma', 'pat2':'pat_soma'})
-            merged['pat_soma'] = pd.to_numeric(merged.iloc[:,1], errors='coerce').fillna(0.0)
-            merged['period'] = pd.to_datetime(merged['period'])
+            # unify column to pat_soma
+            col = merged.columns[1]
+            merged = merged.rename(columns={col: 'pat_soma'})
+            merged['pat_soma'] = pd.to_numeric(merged['pat_soma'], errors='coerce').fillna(0.0)
+            merged['period'] = pd.to_datetime(merged['period'], errors='coerce')
             return merged.set_index('period')[['pat_soma']].sort_index()
+        # two parts: join by period
         m1 = parts[0].set_index('period')
         m2 = parts[1].set_index('period')
         merged = m1.join(m2, how='outer')
         merged = merged.reset_index().rename(columns={'index':'period'})
         merged['pat1'] = pd.to_numeric(merged.get('pat1', 0), errors='coerce').fillna(0.0)
         merged['pat2'] = pd.to_numeric(merged.get('pat2', 0), errors='coerce').fillna(0.0)
-        merged['period'] = pd.to_datetime(merged['period'])
+        merged['period'] = pd.to_datetime(merged['period'], errors='coerce')
         merged['pat_soma'] = merged['pat1'] + merged['pat2']
         return merged.set_index('period')[['pat_soma']].sort_index()
 
-        # --- robust reindex for df_soma using last_periods ---
-    try:
-        # ensure df_soma is a DataFrame and has a datetime index
-        if isinstance(df_soma, pd.DataFrame) and not df_soma.empty:
-            # if index is not datetime, try to convert
-            if not pd.api.types.is_datetime64_any_dtype(df_soma.index):
-                if 'period' in df_soma.columns:
-                    df_soma['period'] = pd.to_datetime(df_soma['period'], errors='coerce')
-                    df_soma = df_soma.set_index('period')
-                else:
-                    # try to coerce index values
-                    try:
-                        df_soma.index = pd.to_datetime(df_soma.index, errors='coerce')
-                    except Exception:
-                        pass
+    # build df_soma and normalize safely
+    df_soma = build_sum_pat(df_a, df_b)
 
-            # normalize last_periods to DatetimeIndex
-            lp = pd.to_datetime(last_periods, errors='coerce')
-            lp = lp[~pd.isna(lp)]
-            if len(lp) == 0:
-                # nothing to reindex to; keep df_soma as-is
-                df_soma = df_soma.copy()
+    # ensure carteira_soma_df exists and is safe
+    carteira_soma_df = pd.DataFrame()
+    if isinstance(df_soma, pd.DataFrame) and not df_soma.empty:
+        # ensure datetime index
+        if not pd.api.types.is_datetime64_any_dtype(df_soma.index):
+            if 'period' in df_soma.columns:
+                df_soma['period'] = pd.to_datetime(df_soma['period'], errors='coerce')
+                df_soma = df_soma.set_index('period')
             else:
-                target_index = pd.DatetimeIndex(lp)
-                # reindex, forward-fill then fill remaining with zeros
+                try:
+                    df_soma.index = pd.to_datetime(df_soma.index, errors='coerce')
+                except Exception:
+                    pass
+        # normalize last_periods to DatetimeIndex
+        lp = pd.to_datetime(last_periods, errors='coerce')
+        lp = lp[~pd.isna(lp)]
+        if len(lp) > 0:
+            target_index = pd.DatetimeIndex(lp)
+            try:
                 df_soma = df_soma.reindex(target_index).sort_index().fillna(method='ffill').fillna(0.0)
+            except Exception:
+                try:
+                    df_soma.index = pd.to_datetime(df_soma.index, errors='coerce')
+                    df_soma = df_soma.reindex(target_index).sort_index().fillna(method='ffill').fillna(0.0)
+                except Exception:
+                    df_soma = pd.DataFrame(index=target_index)
+        # compute returns if numeric column exists
+        if 'pat_soma' in df_soma.columns:
+            carteira_soma_ret = df_soma['pat_soma'].pct_change().fillna(0.0).rename('Carteira (soma) (%)')
+            carteira_soma_df = carteira_soma_ret.to_frame()
         else:
-            # ensure df_soma is an empty DataFrame with datetime index if missing
-            df_soma = pd.DataFrame(index=pd.DatetimeIndex(pd.to_datetime([])))
-    except Exception:
-        # fallback: make df_soma empty DataFrame to avoid breaking the flow
-        df_soma = pd.DataFrame(index=pd.DatetimeIndex(pd.to_datetime([])))
+            numeric_cols = [c for c in df_soma.columns if pd.api.types.is_numeric_dtype(df_soma[c])]
+            if numeric_cols:
+                carteira_soma_ret = df_soma[numeric_cols[0]].pct_change().fillna(0.0).rename('Carteira (soma) (%)')
+                carteira_soma_df = carteira_soma_ret.to_frame()
+            else:
+                carteira_soma_df = pd.DataFrame()
 
+    # monthly returns from individual patrimonios
     def monthly_returns_from_pat(df, label):
         if df.empty:
             return pd.DataFrame()
@@ -215,6 +227,7 @@ def render_performance_infographic(owner_a="Paula Casale", owner_b="Adolfo Pache
     paula_ret = monthly_returns_from_pat(df_a, "Paula (%)")
     adolfo_ret = monthly_returns_from_pat(df_b, "Adolfo (%)")
 
+    # index returns (CDI, IPCA, etc.)
     def index_returns(df, col, label):
         if df.empty or col not in df.columns:
             return pd.DataFrame()
@@ -233,27 +246,53 @@ def render_performance_infographic(owner_a="Paula Casale", owner_b="Adolfo Pache
     usd = index_returns(df_total, 'usd', 'USD (%)')
     carteira_idx = index_returns(df_total, 'carteira', 'Carteira idx (%)')
 
+    # assemble parts safely
     parts = []
     if not carteira_soma_df.empty:
         parts.append(carteira_soma_df)
-    else:
-        if not carteira_idx.empty:
-            parts.append(carteira_idx)
+    elif not carteira_idx.empty:
+        parts.append(carteira_idx)
     parts += [paula_ret, adolfo_ret, cdi, ibov, ipca, usd]
-    df_monthly = pd.concat(parts, axis=1)
-    df_monthly = df_monthly.reindex(pd.to_datetime(last_periods)).fillna(np.nan)
+    # filter out empty frames
+    parts = [p for p in parts if isinstance(p, pd.DataFrame) and not p.empty]
+    if parts:
+        df_monthly = pd.concat(parts, axis=1)
+        # ensure index covers last_periods in order
+        try:
+            target_idx = pd.DatetimeIndex(pd.to_datetime(last_periods, errors='coerce'))
+            target_idx = target_idx[~pd.isna(target_idx)]
+            if len(target_idx) > 0:
+                df_monthly = df_monthly.reindex(target_idx).sort_index().fillna(np.nan)
+        except Exception:
+            df_monthly = df_monthly.sort_index().fillna(np.nan)
+    else:
+        # empty structure with index = last_periods
+        idx = pd.DatetimeIndex(pd.to_datetime(last_periods, errors='coerce'))
+        idx = idx[~pd.isna(idx)]
+        df_monthly = pd.DataFrame(index=idx)
+
     df_monthly.index.name = 'period'
 
     def fmt_cell(v):
         return f"{v*100:.2f}%" if pd.notna(v) else ""
     df_monthly_display = df_monthly.copy()
-    df_monthly_display = df_monthly_display.apply(lambda col: col.map(fmt_cell))
+    if not df_monthly_display.empty:
+        df_monthly_display = df_monthly_display.apply(lambda col: col.map(fmt_cell))
 
     st.markdown("#### Histórico de rentabilidade dos últimos 12 meses (%)")
-    st.table(df_monthly_display.T)
+    if not df_monthly_display.empty:
+        st.table(df_monthly_display.T)
+    else:
+        st.info("Nenhum dado de rentabilidade mensal disponível para exibir.")
 
-    df_acc = (1 + df_monthly.fillna(0)).cumprod() - 1
-    df_acc_plot = df_acc.reset_index().melt(id_vars=['period'], var_name='serie', value_name='acc_ret')
+    # acumulado
+    if not df_monthly.empty:
+        df_acc = (1 + df_monthly.fillna(0)).cumprod() - 1
+        df_acc_plot = df_acc.reset_index().melt(id_vars=['period'], var_name='serie', value_name='acc_ret')
+        # normalize series names
+        df_acc_plot['serie'] = df_acc_plot['serie'].replace({'pat_soma':'Carteira (soma) (%)'})
+    else:
+        df_acc_plot = pd.DataFrame(columns=['period','serie','acc_ret'])
 
     color_map = {
         'Carteira (soma) (%)': '#1f77b4',
@@ -266,17 +305,18 @@ def render_performance_infographic(owner_a="Paula Casale", owner_b="Adolfo Pache
         'USD (%)': '#2ca02c'
     }
 
-    df_acc_plot['serie'] = df_acc_plot['serie'].replace({'pat_soma':'Carteira (soma) (%)'})
-
-    fig = px.line(df_acc_plot, x='period', y='acc_ret', color='serie', markers=True,
-                  labels={'period':'Período','acc_ret':'Rentabilidade acumulada'}, color_discrete_map=color_map)
-    ymin = min(df_acc_plot['acc_ret'].min()*1.1 if not df_acc_plot['acc_ret'].isna().all() else 0, -0.2)
-    ymax = max(df_acc_plot['acc_ret'].max()*1.1 if not df_acc_plot['acc_ret'].isna().all() else 0, 0.6)
-    fig.update_yaxes(tickformat=".0%", range=[ymin, ymax])
-    fig.update_layout(title="Gráfico de rentabilidade acumulada dos últimos 12 meses",
-                      legend_title_text="Séries", height=420, margin=dict(t=40,b=40,l=40,r=40))
-    fig.update_traces(hovertemplate='%{x|%b/%y}: %{y:.2%}')
-    st.plotly_chart(fig, width='stretch')
+    if not df_acc_plot.empty:
+        fig = px.line(df_acc_plot, x='period', y='acc_ret', color='serie', markers=True,
+                      labels={'period':'Período','acc_ret':'Rentabilidade acumulada'}, color_discrete_map=color_map)
+        ymin = min(df_acc_plot['acc_ret'].min()*1.1 if not df_acc_plot['acc_ret'].isna().all() else 0, -0.2)
+        ymax = max(df_acc_plot['acc_ret'].max()*1.1 if not df_acc_plot['acc_ret'].isna().all() else 0, 0.6)
+        fig.update_yaxes(tickformat=".0%", range=[ymin, ymax])
+        fig.update_layout(title="Gráfico de rentabilidade acumulada dos últimos 12 meses",
+                          legend_title_text="Séries", height=420, margin=dict(t=40,b=40,l=40,r=40))
+        fig.update_traces(hovertemplate='%{x|%b/%y}: %{y:.2%}')
+        st.plotly_chart(fig, width='stretch')
+    else:
+        st.info("Nenhum dado para plotar o gráfico de rentabilidade acumulada.")
 
 # ---------------- Visão Geral renderer (single entry point) ----------------
 def render_visao_geral():
@@ -288,13 +328,12 @@ def render_visao_geral():
     df_total_series = load_total_series()
 
     # --- Evolução do patrimônio (global) using aggregated series when available ---
-    # prefer snapshots (daily) if available, else expand monthly aggregated series
     if not df_snapshots.empty:
         df_evol_real = df_snapshots.sort_values("snapshot_date").rename(columns={"snapshot_date":"date","net_worth":"Patrimônio"})
         df_evol_plot = df_evol_real[["date","Patrimônio"]].copy()
         if not df_total_series.empty and "period" in df_total_series.columns:
             df_idx = df_total_series.copy()
-            df_idx['period'] = pd.to_datetime(df_idx['period'])
+            df_idx['period'] = pd.to_datetime(df_idx['period'], errors='coerce')
             df_idx = df_idx.set_index('period').sort_index()
             date_index = pd.date_range(start=df_evol_plot['date'].min(), end=df_evol_plot['date'].max(), freq='D')
             df_daily_idx = df_idx.reindex(df_idx.index.union(date_index)).sort_index()
@@ -304,14 +343,14 @@ def render_visao_geral():
             df_indices_daily = df_daily_idx.reindex(date_index).reset_index().rename(columns={'index':'date'})
             df_evol_plot = df_evol_plot.merge(df_indices_daily[['date','cdi','carteira']], on='date', how='left')
         else:
-            base = float(df_evol_plot["Patrimônio"].iloc[0])
+            base = float(df_evol_plot["Patrimônio"].iloc[0]) if not df_evol_plot["Patrimônio"].isna().all() else 100000.0
             n = len(df_evol_plot)
             df_evol_plot["cdi"] = base * (1 + np.cumsum(np.repeat(0.0003, n)))
             df_evol_plot["carteira"] = df_evol_plot["Patrimônio"]
     else:
         if not df_total_series.empty and "period" in df_total_series.columns:
             df_ts = df_total_series.copy()
-            df_ts['period'] = pd.to_datetime(df_ts['period'])
+            df_ts['period'] = pd.to_datetime(df_ts['period'], errors='coerce')
             df_ts = df_ts[['period','patrimonio','cdi','carteira']].rename(columns={'period':'date','patrimonio':'Patrimônio'})
             df_ts = df_ts.set_index('date').sort_index()
             date_index = pd.date_range(start=df_ts.index.min(), end=df_ts.index.max(), freq='D')
