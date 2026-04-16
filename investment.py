@@ -6,22 +6,7 @@ from db import engine
 import time
 import uuid
 
-# ---------------- Utility: safe rerun ----------------
-def safe_rerun():
-    """
-    Tenta reiniciar o script com st.experimental_rerun().
-    Se não estiver disponível ou falhar, mostra instrução para o usuário.
-    """
-    try:
-        if hasattr(st, "experimental_rerun"):
-            st.experimental_rerun()
-            return
-    except Exception:
-        # se st.experimental_rerun existir mas lançar erro, capturamos e seguimos para fallback
-        pass
-
-    # fallback: instruir o usuário a atualizar manualmente
-    st.info("Alteração salva. Atualize a página manualmente para ver as mudanças.")
+from utils import safe_rerun, format_brl as _format_brl
 
 # ---------------- Read helpers ----------------
 def read_table_safe(name: str) -> pd.DataFrame:
@@ -89,21 +74,10 @@ def aggregate_liabilities_by_category() -> pd.DataFrame:
         return pd.DataFrame(columns=["categoria", "valor"])
     return df.groupby("categoria", as_index=False)["valor"].sum()
 
-# ---------------- Small formatter used in this module ----------------
-def _format_brl(value):
-    try:
-        v = float(value)
-    except Exception:
-        return value
-    s = f"{v:,.2f}"
-    s = s.replace(",", "X").replace(".", ",").replace("X", ".")
-    return f"R$ {s}"
-
 # ---------------- Render function moved to this module ----------------
 def render_controle_ui():
     st.header("Controle de Investimentos")
 
-    # Left column: quick add forms (moved from sidebar)
     col_left, col_right = st.columns([1,2])
 
     with col_left:
@@ -120,7 +94,6 @@ def render_controle_ui():
                     st.success("Ativo adicionado com sucesso.")
                 except Exception as e:
                     st.error(f"Falha ao adicionar ativo: {e}")
-                # use safe rerun
                 safe_rerun()
 
         st.markdown("---")
@@ -139,7 +112,6 @@ def render_controle_ui():
                     st.error(f"Falha ao adicionar passivo: {e}")
                 safe_rerun()
 
-    # Right column: lists, edit/remove controls
     with col_right:
         st.subheader("Ativos manuais")
         df_assets = list_assets()
