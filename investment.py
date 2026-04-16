@@ -288,5 +288,93 @@ def render_controle_ui():
                             st.error(f"Falha ao remover ativo: {e}")
                         safe_rerun()
 
-    st.markdown("---")
-    st.info("Use este painel para controlar holdings, bens e dívidas. Para produção, adicione autenticação, validação e backups.")
+# ------------------ Composição Patrimonial ----------------
+    st.markdown("### Composição Patrimonial | Bens e Investimentos")
+
+    df_holdings = list_holdings()
+    df_assets = list_assets()
+    df_liab = list_liabilities()
+
+    # Build assets from holdings + manual assets
+    if df_holdings.empty and df_assets.empty and df_liab.empty:
+        assets = [
+            {"categoria": "Imóveis", "descricao": "Apartamento SP", "valor": 650000},
+            {"categoria": "Imóveis", "descricao": "Casa de praia", "valor": 420000},
+            {"categoria": "Bens Móveis", "descricao": "Carro - Sedan", "valor": 85000},
+            {"categoria": "Empresas", "descricao": "Participação Startup A", "valor": 200000},
+            {"categoria": "Novos Negócios", "descricao": "Projeto B (pré-receita)", "valor": 50000},
+            {"categoria": "Investimentos", "descricao": "Carteira Ações", "valor": 180000},
+            {"categoria": "Investimentos", "descricao": "Renda Fixa", "valor": 120000},
+        ]
+        liabilities = [
+            {"categoria": "Financiamento Imobiliário", "descricao": "Saldo financiamento apto", "valor": 300000},
+            {"categoria": "Empréstimo Pessoal", "descricao": "Empréstimo banco X", "valor": 25000},
+        ]
+        df_assets_display = pd.DataFrame(assets)
+        df_liab_display = pd.DataFrame(liabilities)
+    else:
+        parts = []
+        if not df_holdings.empty:
+            df_h = df_holdings.copy()
+            if "market_value" in df_h.columns:
+                df_h["valor"] = df_h["market_value"].astype(float)
+            elif "quantity" in df_h.columns and "avg_cost" in df_h.columns:
+                df_h["valor"] = df_h["quantity"].astype(float) * df_h["avg_cost"].astype(float)
+            else:
+                df_h["valor"] = 0.0
+            df_h["categoria"] = df_h.get("category", "Investimentos")
+            df_h["descricao"] = df_h.get("asset_symbol", "")
+            parts.append(df_h[["categoria","descricao","valor"]])
+        if not df_assets.empty:
+            parts.append(df_assets[["categoria","descricao","valor"]])
+        df_assets_display = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=["categoria","descricao","valor"])
+        df_liab_display = df_liab[["categoria","descricao","valor"]] if not df_liab.empty else pd.DataFrame(columns=["categoria","descricao","valor"])
+
+    agg_assets = df_assets_display.groupby("categoria", as_index=False)["valor"].sum() if not df_assets_display.empty else pd.DataFrame(columns=["categoria","valor"])
+    agg_liab = df_liab_display.groupby("categoria", as_index=False)["valor"].sum() if not df_liab_display.empty else pd.DataFrame(columns=["categoria","valor"])
+
+    total_assets = float(agg_assets["valor"].sum()) if not agg_assets.empty else 0.0
+    total_liab = float(agg_liab["valor"].sum()) if not agg_liab.empty else 0.0
+    net_worth = total_assets - total_liab
+
+    # KPIs
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Ativos Totais", format_brl(total_assets))
+    with col2:
+        st.metric("Passivos Totais", format_brl(total_liab))
+    with col3:
+        st.metric("Patrimônio Líquido", format_brl(net_worth))
+
+    st.markdown("#### Distribuição de ativos por categoria")
+    if not agg_assets.empty:
+        fig_assets_pie = px.pie(agg_assets, names="categoria", values="valor", hole=0.35)
+        fig_assets_pie.update_traces(textinfo="percent+label")
+        st.plotly_chart(fig_assets_pie, use_container_width=True)
+    else:
+        st.info("Nenhum ativo registrado ainda.")
+
+    st.markdown("#### Detalhe de ativos")
+    if not df_assets_display.empty:
+        df_display = df_assets_display.copy()
+        df_display["valor"] = df_display["valor"].apply(format_brl)
+        st.dataframe(df_display, use_container_width=True)
+    else:
+        st.write("Nenhum ativo detalhado disponível.")
+
+    st.markdown("#### Distribuição de passivos por categoria")
+    if not agg_liab.empty:
+        fig_liab = px.bar(agg_liab, x="categoria", y="valor", labels={"valor":"Valor (R$)","categoria":"Categoria"}, text="valor")
+        fig_liab.update_traces(texttemplate="R$ %{y:,.0f}")
+        fig_liab.update_layout(yaxis_tickformat=",.0f")
+        st.plotly_chart(fig_liab, use_container_width=True)
+    else:
+        st.info("Nenhum passivo registrado ainda.")
+
+    st.markdown("#### Detalhe de passivos")
+    if not df_liab_display.empty:
+        df_display_l = df_liab_display.copy()
+        df_display_l["valor"] = df_display_l["valor"].apply(format_brl)
+        st.dataframe(df_display_l, use_container_width=True)
+    else:
+        st.write("Nenhum passivo detalhado disponível.")
